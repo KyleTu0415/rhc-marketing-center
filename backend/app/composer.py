@@ -1287,7 +1287,7 @@ def _call_coze_animal_workflow(prompt: str) -> str:
 
 
 def _white_to_transparent(img, strong_thr: int = 242, strong_sat: int = 10,
-                          shadow_thr: int = 175, shadow_sat: int = 12):
+                          shadow_thr: int = 72, shadow_sat: int = 18):
     """纯白影棚背景（含脚下灰色接触阴影）-> 透明RGBA。
     两档判定+边界连通泛洪：死白背景为种子，允许扩散到与之连通的低饱和中性灰影子；
     动物身上的白毛带色温（饱和度更高）且不与边界连通，不会被误抠。不做羽化，边缘干净。"""
