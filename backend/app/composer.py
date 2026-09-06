@@ -1287,115 +1287,107 @@ def _call_coze_animal_workflow(prompt: str) -> str:
 
 
 def _white_to_transparent(img):
-    """纯白影棚背景 -> 透明RGBA（封边泛洪法 v2）。
-    1) 触边影子泛洪：下半部中暗灰(mn110~212,低饱和,非强暖)从图片边界泛洪删除，
-       亮白毛(>=212)/黑爪(<110)/彩毛(sat>=40)/橙毛(R-B>=30)天然阻断，影子爬不进身体；
-    2) 屏障(彩毛/深毛/暖毛)密度过滤后膨胀5px成封闭堤坝，挡背景泛洪灌入毛梢缝隙；
-    3) 堤坝外高亮背景(mn>=208)泛洪删除，堤坝内毛褶阴影全部保留；
-    4) 堤坝内纯背景色被困口袋(腿间雾斑，屏障占比<2%且小块)清除；
-    5) 腐蚀3px收掉堤坝带出的外圈白边。
-    安全带设计：影子上界212、背景下界208之间的过渡白毛两边都不碰，优先保毛不破洞。"""
     import numpy as np
     from PIL import ImageFilter
-    from collections import deque as _dq
+    from collections import deque as _deque
     rgba = img.convert("RGBA")
-    arr = np.asarray(rgba, dtype=np.uint8)
-    h, w = arr.shape[0], arr.shape[1]
-    R = arr[:, :, 0].astype(np.int16)
-    G = arr[:, :, 1].astype(np.int16)
-    B = arr[:, :, 2].astype(np.int16)
-    mx = np.maximum(np.maximum(R, G), B)
-    mn = np.minimum(np.minimum(R, G), B)
-    sat = mx - mn
+    arr = np.asarray(rgba, np.uint8)
+    h, w = arr.shape[:2]
+    R = arr[:,:,0].astype(np.int16); G = arr[:,:,1].astype(np.int16); B = arr[:,:,2].astype(np.int16)
+    mx = np.maximum(np.maximum(R,G),B); mn = np.minimum(np.minimum(R,G),B); sat = mx-mn
 
-    # 黑底兼容：AI偶尔生成黑背景，四角偏暗则走黑底泛洪（暗色低饱和从边界删，白/彩毛高亮阻断）
+    # 黑底兼容：四角偏暗判定为黑背景，暗色低饱和从边界泛洪删除
     _corn = int(min(int(mn[2,2]), int(mn[2,w-3]), int(mn[h-3,2]), int(mn[h-3,w-3])))
     if _corn < 80:
         black_bg = (mn < 70) & (sat < 45)
-        bvis = np.zeros((h, w), dtype=bool)
-        _ed = np.zeros((h, w), dtype=bool); _ed[0,:]=_ed[h-1,:]=_ed[:,0]=_ed[:,w-1]=True
-        _bys,_bxs = np.where(_ed & black_bg)
-        _bq = __import__("collections").deque()
-        for _y,_x in zip(_bys.tolist(), _bxs.tolist()):
-            bvis[_y,_x]=True; _bq.append((_y,_x))
-        while _bq:
-            _y,_x = _bq.popleft()
-            for _dy,_dx in ((1,0),(-1,0),(0,1),(0,-1)):
-                _ny,_nx = _y+_dy, _x+_dx
-                if 0<=_ny<h and 0<=_nx<w and black_bg[_ny,_nx] and not bvis[_ny,_nx]:
-                    bvis[_ny,_nx]=True; _bq.append((_ny,_nx))
-        _balpha = np.where(bvis, 0, 255).astype(np.uint8)
-        _balpha = np.asarray(Image.fromarray(_balpha).filter(ImageFilter.MinFilter(5)))
-        return Image.fromarray(np.dstack([arr[:,:,:3], _balpha]), "RGBA")
+        bvis = np.zeros((h,w), bool)
+        ed = np.zeros((h,w), bool); ed[0,:]=ed[h-1,:]=ed[:,0]=ed[:,w-1]=True
+        ys,xs = np.where(ed & black_bg)
+        q = _deque()
+        for y,x in zip(ys.tolist(), xs.tolist()):
+            bvis[y,x]=True; q.append((int(y),int(x)))
+        while q:
+            y,x = q.popleft()
+            for dy,dx in ((1,0),(-1,0),(0,1),(0,-1)):
+                ny,nx=y+dy,x+dx
+                if 0<=ny<h and 0<=nx<w and black_bg[ny,nx] and not bvis[ny,nx]:
+                    bvis[ny,nx]=True; q.append((ny,nx))
+        balpha = np.where(bvis, 0, 255).astype(np.uint8)
+        balpha = np.asarray(Image.fromarray(balpha).filter(ImageFilter.MinFilter(5)))
+        return Image.fromarray(np.dstack([arr[:,:,:3], balpha]), "RGBA")
 
-    is_bg_col = (sat <= 14) & ((B - R) >= -4) & (mn >= 150)
-    is_sh_col = (sat <= 16) & ((B - R) >= -6) & (mn >= 50) & (mn < 225)
+    is_bg_col = (sat<=14) & ((B-R)>=-4) & (mn>=150)
+    is_sh_col = (sat<=16) & ((B-R)>=-6) & (mn>=50) & (mn<225)
 
-    # 1) 触边影子泛洪（限下半部，防爬上后臀暗白毛）
-    edge = np.zeros((h, w), dtype=bool)
-    edge[0, :] = edge[h-1, :] = edge[:, 0] = edge[:, w-1] = True
-    ymask = np.zeros((h, w), dtype=bool); ymask[int(h*0.58):, :] = True
-    sh_pass = (sat < 40) & (mn >= 110) & (mn < 212) & ((R - B) < 30) & ymask
+    # 第一步：触边影子泛洪。中暗灰(mn120~215,sat<50,暖冷都算)，亮白毛/黑毛/彩毛天然阻断
+    edge = np.zeros((h,w), bool)
+    edge[0,:]=edge[h-1,:]=edge[:,0]=edge[:,w-1]=True
+    ymask = np.zeros((h,w),bool); ymask[int(h*0.72):,:] = True
+    sh_pass = (sat<40) & (mn>=110) & (mn<212) & ((R-B)<30) & ymask
     shadow = _flood_mask(edge, sh_pass, h, w)
     transparent = shadow.copy()
 
-    # 2) 封边屏障：彩/深毛 + 暖毛；暖点需邻近毛尖（密度过滤剔除孤立暖雾点）
-    strong = (sat > 14) | (mn < 150)
-    warm = (R - B) >= 3
+    # 第二步：封边屏障。strong彩/深毛 + warm暖毛 + mid中灰白毛(比背景暗的身体纹理)
+    strong = (sat>14) | (mn<150)
+    warm = (R-B) >= 3
+    # 亮暖白(warm且极亮mn>=235)里，连通到图片边缘且内部无strong锚点的块 = 暖白背景(如金毛暖调白底)，踢出屏障；
+    # 不触边的亮暖白毛团(白狗身体/头顶)保留。
+    bright_warm = warm & (mn >= 235) & (~shadow)
+    bw_lab = np.zeros((h, w), np.int32); bcnt = 0
+    for by in range(h):
+        for bx in range(w):
+            if bright_warm[by,bx] and bw_lab[by,bx]==0:
+                bcnt += 1; q=_deque([(by,bx)]); bw_lab[by,bx]=bcnt
+                touch=False; strong_cnt=0; tot=0
+                while q:
+                    y,x=q.popleft(); tot+=1
+                    if y<=2 or y>=h-3 or x<=2 or x>=w-3: touch=True
+                    if strong[y,x]: strong_cnt+=1
+                    for dy,dx in ((1,0),(-1,0),(0,1),(0,-1)):
+                        ny,nx=y+dy,x+dx
+                        if 0<=ny<h and 0<=nx<w and bright_warm[ny,nx] and bw_lab[ny,nx]==0:
+                            bw_lab[ny,nx]=bcnt; q.append((ny,nx))
+                if touch and strong_cnt < max(3, tot*0.005):
+                    ys,xs=np.where(bw_lab==bcnt)
+                    bright_warm[ys,xs]=False
+    warm = warm & ((mn < 235) | bright_warm)
     barrier_raw = (strong | warm) & (~is_sh_col) & (~shadow)
-    dens = np.asarray(
-        Image.fromarray((barrier_raw * 255).astype(np.uint8)).filter(ImageFilter.BoxBlur(2))
-    )
-    barrier = barrier_raw & (strong | (dens >= 31))
-    seal = np.asarray(
-        Image.fromarray((barrier * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(11))
-    ) > 0
+    dens = np.asarray(Image.fromarray((barrier_raw*255).astype(np.uint8)).filter(ImageFilter.BoxBlur(2)))
+    barrier = barrier_raw & (strong | (dens>=31))
+    seal = np.asarray(Image.fromarray((barrier*255).astype(np.uint8)).filter(ImageFilter.MaxFilter(11)))>0
 
-    # 3) 堤坝外背景泛洪（高亮，seal与已删影子区不可通过）
-    bg_flood = (sat <= 20) & (mn >= 208)
-    visited = np.zeros((h, w), dtype=bool)
-    dq = _dq()
-    def _seed(y, x):
-        if bg_flood[y, x] and not seal[y, x] and not visited[y, x] and not transparent[y, x]:
-            visited[y, x] = True; dq.append((y, x))
-    for x in range(w):
-        _seed(0, x); _seed(h - 1, x)
-    for y in range(h):
-        _seed(y, 0); _seed(y, w - 1)
-    while dq:
-        y, x = dq.popleft()
-        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            ny, nx = y + dy, x + dx
-            if 0 <= ny < h and 0 <= nx < w and not visited[ny, nx] and not seal[ny, nx] and not transparent[ny, nx] and bg_flood[ny, nx]:
-                visited[ny, nx] = True; dq.append((ny, nx))
-    transparent |= visited
+    # 第三步：环外背景泛洪（高亮，seal不可通过）
+    bg_flood = (sat<=18) & (mn>=225)
+    # 传播可穿过已删透明区(transparent)，只被seal坝和非背景毛阻挡；仅bg_flood像素标记删除
+    bg_pass = (bg_flood | transparent) & (~seal)
+    visited = _flood_mask(edge, bg_pass, h, w)
+    transparent |= (visited & bg_flood)
 
-    # 4) 堤坝内被困口袋（纯背景/影子色小块）
-    pocket_seed = (~transparent) & (~seal) & (is_bg_col | is_sh_col | ((sat <= 20) & (mn >= 208)))
-    p_lab = np.zeros((h, w), dtype=np.int32)
-    cur = 0
+    # 第四步：环内被困口袋（高亮/冷白纯背景小块）
+    pocket_seed = (~transparent) & (~seal) & (is_bg_col | is_sh_col | ((sat<=18)&(mn>=225)))
+    p_lab = np.zeros((h,w), np.int32); cur=0; dbg=[]
     for sy in range(h):
         for sx in range(w):
-            if pocket_seed[sy, sx] and p_lab[sy, sx] == 0:
-                cur += 1
-                q = _dq([(sy, sx)]); p_lab[sy, sx] = cur; cnt = 0; bc = 0
+            if pocket_seed[sy,sx] and p_lab[sy,sx]==0:
+                cur+=1; q=_deque([(sy,sx)]); p_lab[sy,sx]=cur; cnt=0; bc=0; sc=0; ysum=0; te=False
                 while q:
-                    y, x = q.popleft(); cnt += 1
-                    if barrier[y, x]:
-                        bc += 1
-                    for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                        ny, nx = y + dy, x + dx
-                        if 0 <= ny < h and 0 <= nx < w and not seal[ny, nx] and pocket_seed[ny, nx] and p_lab[ny, nx] == 0:
-                            p_lab[ny, nx] = cur; q.append((ny, nx))
-                if bc / max(cnt, 1) < 0.02 and cnt < 80000:
-                    ys_l, xs_l = np.where(p_lab == cur)
-                    transparent[ys_l, xs_l] = True
+                    y,x=q.popleft(); cnt+=1; ysum+=y
+                    if barrier[y,x]: bc+=1
+                    if strong[y,x]: sc+=1
+                    if y<=2 or y>=h-3 or x<=2 or x>=w-3: te=True
+                    for dy,dx in ((1,0),(-1,0),(0,1),(0,-1)):
+                        ny,nx=y+dy,x+dx
+                        if 0<=ny<h and 0<=nx<w and not seal[ny,nx] and pocket_seed[ny,nx] and p_lab[ny,nx]==0:
+                            p_lab[ny,nx]=cur; q.append((ny,nx))
+                cy = ysum/max(cnt,1)/h
+                is_foam = (sc/max(cnt,1) < 0.01) and ((cy > 0.72) or te)
+                if (bc/max(cnt,1)<0.02 and cnt<80000) or is_foam:
+                    ys,xs=np.where(p_lab==cur); transparent[ys,xs]=True
+        dbg.sort(key=lambda t:-t[1]); print("  口袋:",dbg[:6])
 
-    alpha = np.where(transparent, 0, 255).astype(np.uint8)
-    alpha = np.asarray(Image.fromarray(alpha).filter(ImageFilter.MinFilter(7)))
-    out = np.dstack([arr[:, :, :3], alpha])
-    return Image.fromarray(out, "RGBA")
-
+    alpha = np.where(transparent,0,255).astype(np.uint8)
+    alpha = np.asarray(Image.fromarray(alpha).filter(ImageFilter.MinFilter(5)))
+    return Image.fromarray(np.dstack([arr[:,:,:3],alpha]),"RGBA")
 
 def _flood_mask(seed_mask, passable, h, w):
     """从 seed_mask 与 passable 的交集出发，在 passable 上4邻域泛洪，返回访问掩码。"""
