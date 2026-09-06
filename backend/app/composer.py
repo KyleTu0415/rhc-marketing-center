@@ -1286,27 +1286,30 @@ def _call_coze_animal_workflow(prompt: str) -> str:
     return urls[0]
 
 
-def _white_to_transparent(img, strong_thr: int = 242, strong_sat: int = 10,
-                          shadow_thr: int = 72, shadow_sat: int = 18):
-    """纯白影棚背景（含脚下灰色接触阴影）-> 透明RGBA。
-    两档判定+边界连通泛洪：死白背景为种子，允许扩散到与之连通的低饱和中性灰影子；
-    动物身上的白毛带色温（饱和度更高）且不与边界连通，不会被误抠。不做羽化，边缘干净。"""
+def _white_to_transparent(img):
+    """纯白影棚背景 -> 透明RGBA。
+    核心判据：影棚白底是中性冷白（RGB三通道几乎相等，且B>=R）；
+    动物白毛/彩色毛带暖色温（R明显>B）或有饱和度，不会被误判。
+    影子单独用连通域面积过滤清除，不做跨身体蔓延，避免白狗被掏空。"""
     import numpy as np
-    from collections import deque
+    from collections import deque as _dq
     rgba = img.convert("RGBA")
     arr = np.asarray(rgba, dtype=np.uint8)
     h, w = arr.shape[0], arr.shape[1]
-    rgb = arr[:, :, :3].astype(np.int16)
-    mx = rgb.max(axis=2)
-    mn = rgb.min(axis=2)
+    R = arr[:, :, 0].astype(np.int16)
+    G = arr[:, :, 1].astype(np.int16)
+    B = arr[:, :, 2].astype(np.int16)
+    mx = np.maximum(np.maximum(R, G), B)
+    mn = np.minimum(np.minimum(R, G), B)
     sat = mx - mn
-    strong_bg = (mn >= strong_thr) & (sat <= strong_sat)   # 死白底
-    shadow_bg = (mn >= shadow_thr) & (sat <= shadow_sat)   # 中性灰接触阴影
+
+    # 背景判定：① 近中性灰（低饱和）② 冷调（蓝不弱于红，暖白毛发R>B会被排除）
+    bg = (sat <= 14) & ((B - R) >= -4) & (mn >= 150)
 
     visited = np.zeros((h, w), dtype=bool)
-    dq = deque()
+    dq = _dq()
     def _seed(y, x):
-        if strong_bg[y, x] and not visited[y, x]:
+        if bg[y, x] and not visited[y, x]:
             visited[y, x] = True
             dq.append((y, x))
     for x in range(w):
@@ -1317,42 +1320,33 @@ def _white_to_transparent(img, strong_thr: int = 242, strong_sat: int = 10,
         y, x = dq.popleft()
         for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             ny, nx = y + dy, x + dx
-            if 0 <= ny < h and 0 <= nx < w and not visited[ny, nx]:
-                if strong_bg[ny, nx] or shadow_bg[ny, nx]:
-                    visited[ny, nx] = True
-                    dq.append((ny, nx))
+            if 0 <= ny < h and 0 <= nx < w and not visited[ny, nx] and bg[ny, nx]:
+                visited[ny, nx] = True
+                dq.append((ny, nx))
 
-    # 残留深灰影子：与边界白底不直接连通的小面积灰色斑块（夹在四肢间的投影）。
-    # 用连通域面积过滤：影子是游离的小块（<2万像素），狗身体/爪子是大块，不会误伤。
-    fg_gray = (~visited) & (mn >= 50) & (mn < 205) & (sat <= 22)
+    # 影子清除：与边界连通的中性灰暗区（接触阴影），灰度中低、低饱和、冷调
+    shadow_seed = (sat <= 16) & ((B - R) >= -6) & (mn >= 50) & (mn < 225)
     lab = np.zeros((h, w), dtype=np.int32)
     cur = 0
-    from collections import deque as _dq
     for sy in range(h):
         for sx in range(w):
-            if fg_gray[sy, sx] and lab[sy, sx] == 0:
+            if shadow_seed[sy, sx] and lab[sy, sx] == 0:
                 cur += 1
-                q = _dq([(sy, sx)]); lab[sy, sx] = cur; cnt = 0
+                q = _dq([(sy, sx)]); lab[sy, sx] = cur; cnt = 0; touches = False
                 while q:
                     y, x = q.popleft(); cnt += 1
+                    if y == 0 or y == h-1 or x == 0 or x == w-1:
+                        touches = True
                     for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
                         ny, nx = y + dy, x + dx
-                        if 0 <= ny < h and 0 <= nx < w and fg_gray[ny, nx] and lab[ny, nx] == 0:
+                        if 0 <= ny < h and 0 <= nx < w and shadow_seed[ny, nx] and lab[ny, nx] == 0:
                             lab[ny, nx] = cur; q.append((ny, nx))
-                if cnt < 20000:
+                # 与边界连通的影子（接触投影）才清除；身体内部/大块暗部保留
+                if touches or cnt < 30000:
                     ys_l, xs_l = np.where(lab == cur)
                     visited[ys_l, xs_l] = True
 
     alpha = np.where(visited, 0, 255).astype(np.uint8)
-    # 形态学收边：对前景做2像素腐蚀，清掉边缘半透明毛边和贴边的细条残影
-    fg2d = alpha > 0
-    er = fg2d.copy()
-    for _ in range(2):
-        e2 = er.copy()
-        e2[1:, :] &= er[:-1, :]; e2[:-1, :] &= er[1:, :]
-        e2[:, 1:] &= er[:, :-1]; e2[:, :-1] &= er[:, 1:]
-        er = e2
-    alpha = np.where(er, 255, 0).astype(np.uint8)
     out = np.dstack([arr[:, :, :3], alpha])
     return Image.fromarray(out, "RGBA")
 
