@@ -1308,6 +1308,26 @@ def _white_to_transparent(img):
     mn = np.minimum(np.minimum(R, G), B)
     sat = mx - mn
 
+    # 黑底兼容：AI偶尔生成黑背景，四角偏暗则走黑底泛洪（暗色低饱和从边界删，白/彩毛高亮阻断）
+    _corn = int(min(int(mn[2,2]), int(mn[2,w-3]), int(mn[h-3,2]), int(mn[h-3,w-3])))
+    if _corn < 80:
+        black_bg = (mn < 70) & (sat < 45)
+        bvis = np.zeros((h, w), dtype=bool)
+        _ed = np.zeros((h, w), dtype=bool); _ed[0,:]=_ed[h-1,:]=_ed[:,0]=_ed[:,w-1]=True
+        _bys,_bxs = np.where(_ed & black_bg)
+        _bq = __import__("collections").deque()
+        for _y,_x in zip(_bys.tolist(), _bxs.tolist()):
+            bvis[_y,_x]=True; _bq.append((_y,_x))
+        while _bq:
+            _y,_x = _bq.popleft()
+            for _dy,_dx in ((1,0),(-1,0),(0,1),(0,-1)):
+                _ny,_nx = _y+_dy, _x+_dx
+                if 0<=_ny<h and 0<=_nx<w and black_bg[_ny,_nx] and not bvis[_ny,_nx]:
+                    bvis[_ny,_nx]=True; _bq.append((_ny,_nx))
+        _balpha = np.where(bvis, 0, 255).astype(np.uint8)
+        _balpha = np.asarray(Image.fromarray(_balpha).filter(ImageFilter.MinFilter(5)))
+        return Image.fromarray(np.dstack([arr[:,:,:3], _balpha]), "RGBA")
+
     is_bg_col = (sat <= 14) & ((B - R) >= -4) & (mn >= 150)
     is_sh_col = (sat <= 16) & ((B - R) >= -6) & (mn >= 50) & (mn < 225)
 
