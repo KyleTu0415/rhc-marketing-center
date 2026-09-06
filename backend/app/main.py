@@ -259,7 +259,9 @@ async def api_compose(req: ComposeRequest):
             from app.composer import generate_animal_cutout
             prompt = getattr(req, 'prompt', '') or ''
             result = generate_animal_cutout(prompt=prompt)
-            return {"image_url": result.get("image_url", ""), "status": result.get("status", "failed")}
+            if result.get("status") == "failed" or not result.get("image_url"):
+                raise HTTPException(status_code=502, detail=result.get("error", "") or "动物素材生成失败，请稍后重试")
+            return {"image_url": result.get("image_url", ""), "status": result.get("status", "success")}
         elif mode == 'background' or getattr(req, 'ai_background', False):
             from app.composer import generate_ai_background
             ai_prompt = getattr(req, 'ai_prompt', '') or getattr(req, 'text', '') or ''

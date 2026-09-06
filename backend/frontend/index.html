@@ -1877,7 +1877,7 @@ function cp2GenerateAnimal(i){
   var a=pg.animals[i];
   if(!a.prompt||!a.prompt.trim()){if(typeof showToast==='function')showToast('请先输入动物描述','warning');return;}
   var st=document.getElementById('cp2-animal-st-'+i);
-  if(st){st.textContent='正在搜索并抠图...';st.style.color='var(--color-primary)';}
+  if(st){st.textContent='正在生成透明底动物图...';st.style.color='var(--color-primary)';}
   fetch(apiUrl('/api/compose'),{
     method:'POST',
     headers:{'Content-Type':'application/json'},

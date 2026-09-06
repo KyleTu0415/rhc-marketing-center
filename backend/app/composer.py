@@ -1246,10 +1246,161 @@ def search_animal_image(prompt: str) -> bytes:
 
 
 
+def _call_coze_animal_workflow(prompt: str) -> str:
+    """调用 Coze 动物素材工作流（生成纯白影棚底动物图），返回图片URL。"""
+    from app.config import settings
+    pat = settings.COZE_PAT
+    workflow_id = getattr(settings, "COZE_ANIMAL_WORKFLOW_ID", "") or ""
+    if not pat:
+        raise RuntimeError("Coze PAT 未配置，请在配置中心检查密钥设置")
+    if not workflow_id:
+        raise RuntimeError("动物素材工作流 ID 未配置，请在配置中心检查")
+    api_url = "https://api.coze.cn/v1/workflow/run"
+    payload = {"workflow_id": workflow_id, "parameters": {"style": prompt.strip()}}
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        api_url, data=body,
+        headers={"Authorization": f"Bearer {pat}", "Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=150) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        raise RuntimeError(f"调用 Coze 动物工作流失败（{type(e).__name__}）：{e}")
+    code = result.get("code")
+    if code != 0:
+        msg = result.get("msg", "") or result.get("message", "")
+        raise RuntimeError(f"Coze 动物工作流返回错误（code={code}）：{msg}")
+    data_str = result.get("data", "")
+    if isinstance(data_str, str):
+        if not data_str.strip():
+            raise RuntimeError("Coze 动物工作流返回为空，可能是生成超时，请稍后重试")
+        data_obj = json.loads(data_str)
+    else:
+        data_obj = data_str
+    output_list = (data_obj or {}).get("output", [])
+    urls = [u for u in output_list if isinstance(u, str) and u.startswith("http")]
+    if not urls:
+        raise RuntimeError("Coze 动物工作流没有返回图片地址")
+    return urls[0]
+
+
+def _white_to_transparent(img, threshold: int = 235, sat_limit: int = 18):
+    """纯白影棚背景 -> 透明RGBA。
+    从画布四边做连通泛洪，只去除与边界相连的白色区域（动物身上的白色不会误伤）；
+    紧贴动物轮廓的浅白像素做羽化半透明，避免白边。返回PIL RGBA图像。"""
+    import numpy as np
+    from collections import deque
+    rgba = img.convert("RGBA")
+    arr = np.asarray(rgba, dtype=np.uint8)
+    h, w = arr.shape[0], arr.shape[1]
+    rgb = arr[:, :, :3].astype(np.int16)
+    mx = rgb.max(axis=2)
+    mn = rgb.min(axis=2)
+    near_white = (mn >= threshold) & ((mx - mn) <= sat_limit)
+
+    visited = np.zeros((h, w), dtype=bool)
+    dq = deque()
+    for x in range(w):
+        for y in (0, h - 1):
+            if near_white[y, x] and not visited[y, x]:
+                visited[y, x] = True
+                dq.append((y, x))
+    for y in range(h):
+        for x in (0, w - 1):
+            if near_white[y, x] and not visited[y, x]:
+                visited[y, x] = True
+                dq.append((y, x))
+    while dq:
+        y, x = dq.popleft()
+        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            ny, nx = y + dy, x + dx
+            if 0 <= ny < h and 0 <= nx < w and not visited[ny, nx] and near_white[ny, nx]:
+                visited[ny, nx] = True
+                dq.append((ny, nx))
+
+    alpha = np.where(visited, 0, 255).astype(np.uint8)
+
+    # 轮廓边缘羽化：紧挨着透明背景的发白像素按白度降透明度，消除白毛边
+    bg_dil = visited.copy()
+    bg_dil[1:, :] |= visited[:-1, :]
+    bg_dil[:-1, :] |= visited[1:, :]
+    bg_dil[:, 1:] |= visited[:, :-1]
+    bg_dil[:, :-1] |= visited[:, 1:]
+    fringe = bg_dil & (~visited)
+    ys, xs = np.where(fringe)
+    for y, x in zip(ys, xs):
+        m, n = int(mx[y, x]), int(mn[y, x])
+        if m >= 205 and (m - n) <= 40:
+            alpha[y, x] = int(max(0, min(255, round((m - 205) / 30 * 255))))
+
+    out = np.dstack([arr[:, :, :3], alpha])
+    return Image.fromarray(out, "RGBA")
+
+
 def generate_animal_cutout(prompt: str, api_key: str = "") -> dict:
+    """方案C：Coze工作流按描述生成纯白底动物图 -> 本地去白底 -> 透明PNG。
+    AI路径失败时降级到旧图库/rembg路径（仅当旧路径真的产出透明底才采用）。"""
+    result = {"status": "success", "log": [], "image_url": "", "cutout_ok": False}
+    prompt = (prompt or "").strip()
+    if not prompt:
+        result["status"] = "failed"
+        result["error"] = "请先填写动物描述后再生成"
+        return result
+
+    # 主路径：Coze AI 工作流
+    ai_error = ""
+    try:
+        result["log"].append(f"[info] AI generating animal for prompt='{prompt}'")
+        img_url = _call_coze_animal_workflow(prompt)
+        result["log"].append(f"[ok] workflow returned: {img_url[:90]}")
+        import httpx
+        with httpx.Client(timeout=60, follow_redirects=True) as client:
+            resp = client.get(img_url)
+            resp.raise_for_status()
+            img_bytes = resp.content
+        result["log"].append(f"[ok] downloaded {len(img_bytes)} bytes")
+        from PIL import Image
+        import io as _io
+        import time as _t
+        base_img = Image.open(_io.BytesIO(img_bytes))
+        cut_img = _white_to_transparent(base_img)
+        buf = _io.BytesIO()
+        cut_img.save(buf, format="PNG")
+        cutout_bytes = buf.getvalue()
+        result["log"].append(f"[ok] white background removed, PNG {len(cutout_bytes)} bytes")
+        cutout_url = _upload_bytes_to_freeimage(cutout_bytes, f"animal_ai_{int(_t.time())}.png")
+        result["log"].append(f"[ok] uploaded: {cutout_url[:90]}")
+        result["image_url"] = cutout_url
+        result["cutout_ok"] = True
+        return result
+    except Exception as e:
+        ai_error = f"AI 动物生成失败：{e}"
+        result["log"].append(f"[error] {ai_error}")
+
+    # 降级路径：旧硬编码图库 + rembg（只有真抠出透明底才算数）
+    try:
+        result["log"].append("[info] trying legacy image library fallback")
+        legacy = _generate_animal_cutout_legacy(prompt=prompt, api_key=api_key)
+        if legacy.get("cutout_ok") and legacy.get("image_url"):
+            result["image_url"] = legacy["image_url"]
+            result["cutout_ok"] = True
+            result["log"].append("[ok] legacy fallback produced a transparent cutout")
+            return result
+        result["log"].append("[warn] legacy fallback did not produce a transparent cutout either")
+    except Exception as e:
+        result["log"].append(f"[warn] legacy fallback error: {e}")
+
+    result["status"] = "failed"
+    result["error"] = ai_error or "动物素材生成失败，请稍后重试"
+    return result
+
+
+def _generate_animal_cutout_legacy(prompt: str, api_key: str = "") -> dict:
     """Search animal image, remove background via rembg, upload transparent PNG."""
     import random
-    result = {"status": "success", "log": [], "image_url": ""}
+    result = {"status": "success", "log": [], "image_url": "", "cutout_ok": False}
     try:
         # Step 1: Translate to English for better matching
         query = _translate_to_english(prompt)
@@ -1295,7 +1446,8 @@ def generate_animal_cutout(prompt: str, api_key: str = "") -> dict:
             result["log"].append(f"[warn] cutout failed ({e}), returning original image")
 
         # Step 6: Return cutout or fallback original
-        result["image_url"] = cutout_url or img_url
+        result["image_url"] = cutout_url or ""
+        result["cutout_ok"] = bool(cutout_url)
     except Exception as e:
         result["status"] = "failed"
         result["log"].append(f"[error] {str(e)}")
