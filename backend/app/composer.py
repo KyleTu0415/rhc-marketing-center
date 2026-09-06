@@ -1363,15 +1363,25 @@ def generate_animal_cutout(prompt: str, api_key: str = "") -> dict:
         result["log"].append(f"[ok] downloaded {len(img_bytes)} bytes")
         from PIL import Image
         import io as _io
+        import os as _os
         import time as _t
         base_img = Image.open(_io.BytesIO(img_bytes))
         cut_img = _white_to_transparent(base_img)
-        buf = _io.BytesIO()
-        cut_img.save(buf, format="PNG")
-        cutout_bytes = buf.getvalue()
-        result["log"].append(f"[ok] white background removed, PNG {len(cutout_bytes)} bytes")
-        cutout_url = _upload_bytes_to_freeimage(cutout_bytes, f"animal_ai_{int(_t.time())}.png")
-        result["log"].append(f"[ok] uploaded: {cutout_url[:90]}")
+        # 优先保存到后端本地 uploads 静态目录（同域，无第三方依赖）；失败再降级 freeimage
+        cutout_url = ""
+        try:
+            _uploads_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__))), "uploads")
+            _os.makedirs(_uploads_dir, exist_ok=True)
+            _fname = f"animal_ai_{int(_t.time()*1000)}.png"
+            cut_img.save(_os.path.join(_uploads_dir, _fname), format="PNG")
+            cutout_url = f"/uploads/{_fname}"
+            result["log"].append(f"[ok] white background removed, saved to local uploads: {_fname}")
+        except Exception as _le:
+            result["log"].append(f"[warn] local save failed ({_le}), trying freeimage")
+            _buf = _io.BytesIO()
+            cut_img.save(_buf, format="PNG")
+            cutout_url = _upload_bytes_to_freeimage(_buf.getvalue(), f"animal_ai_{int(_t.time())}.png")
+            result["log"].append(f"[ok] uploaded to freeimage: {cutout_url[:90]}")
         result["image_url"] = cutout_url
         result["cutout_ok"] = True
         return result

@@ -2448,6 +2448,11 @@ for _d in _candidate_dirs:
     if os.path.isdir(_d):
         static_dir = _d
         break
+# Serve generated uploads (transparent PNGs etc.) as static files
+_uploads_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
+os.makedirs(_uploads_dir, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=_uploads_dir), name="uploads")
+
 if static_dir:
     app.mount("/", StaticFiles(directory=static_dir, html=True), name="frontend")
 
