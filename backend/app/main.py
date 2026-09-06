@@ -882,6 +882,7 @@ class LeadUpdateRequest(BaseModel):
 
 class LeadFindEmailRequest(BaseModel):
     record_id: str = ""
+    company: str = ""  # 前端输入框当前值（未保存时也可直接搜索）
 
 
 @app.post("/api/leads/claim")
@@ -1630,6 +1631,8 @@ async def api_leads_find_email(req: LeadFindEmailRequest, request: Request):
         print(f"[find-email] 读取线索记录失败（{record_id}）: {e}")
         return JSONResponse({"detail": f"读取线索失败：飞书线索服务暂时不可用（{e}）"},
                             status_code=502)
+    # 前端输入框里未保存的公司名优先；为空再退回飞书记录里的值
+    company = (getattr(req, "company", "") or "").strip() or company
     if not company:
         return JSONResponse({"detail": "请先填写公司/机构名再查找邮箱"}, status_code=400)
     try:

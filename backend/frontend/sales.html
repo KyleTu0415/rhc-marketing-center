@@ -1753,12 +1753,14 @@ function manualSearchLead(rid){
 /* 智能查找邮箱：后端自动搜官网/联系页/新闻原文，返回候选供人工审核采用 */
 function findLeadEmail(rid,btn){
   var box=document.getElementById('find-email-results-'+rid);
+  var _ci=document.getElementById('lf-company-'+rid);
+  var _company=_ci?_ci.value.trim():'';
   if(btn){btn.disabled=true;btn.textContent='正在搜索官网与公开联系页…'}
   if(box)box.innerHTML='<div class="lead-email-empty">正在搜索官网与公开联系页，通常 20-35 秒，请稍候…</div>';
   fetch('/api/leads/find-email',{
     method:'POST',
     headers:Object.assign({'Content-Type':'application/json'},authHeaders()),
-    body:JSON.stringify({record_id:rid})
+    body:JSON.stringify({record_id:rid,company:_company})
   }).then(function(r){return r.json().then(function(d){return {status:r.status,data:d}})})
     .then(function(res){
       if(btn){btn.disabled=false;btn.textContent='智能查找邮箱'}
