@@ -1370,7 +1370,7 @@ def generate_animal_cutout(prompt: str, api_key: str = "") -> dict:
         # 优先保存到后端本地 uploads 静态目录（同域，无第三方依赖）；失败再降级 freeimage
         cutout_url = ""
         try:
-            _uploads_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__))), "uploads")
+            _uploads_dir = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "uploads")
             _os.makedirs(_uploads_dir, exist_ok=True)
             _fname = f"animal_ai_{int(_t.time()*1000)}.png"
             cut_img.save(_os.path.join(_uploads_dir, _fname), format="PNG")
