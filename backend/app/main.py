@@ -1778,6 +1778,15 @@ async def api_cutout(request: Request):
 @app.get("/api/proxy-image")
 async def api_proxy_image(url: str):
     """Proxy image to avoid CORS taint on canvas. Returns image bytes with CORS headers."""
+    import os as _os
+    if url.startswith("/") and not url.startswith("//"):
+        from fastapi.responses import FileResponse
+        _base = _os.path.dirname(_os.path.dirname(__file__))
+        _safe = _os.path.normpath(_os.path.join(_base, url.lstrip("/")))
+        _uploads = _os.path.join(_base, "uploads")
+        if _safe.startswith(_uploads + _os.sep) and _os.path.isfile(_safe):
+            return FileResponse(_safe)
+        raise HTTPException(status_code=404, detail="local file not found")
     import httpx
     try:
         async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:

@@ -1244,6 +1244,8 @@ function cp2ResetCutout(){
 function cp2ProxyUrl(url){
   if(!url)return '';
   if(url.startsWith('data:')||url.startsWith('blob:'))return url;
+  if(url.startsWith('/')&&!url.startsWith('//'))return url;
+  try{var u=new URL(url,location.origin);if(u.origin===location.origin)return u.pathname+u.search;}catch(e){}
   return apiUrl('/api/proxy-image?url=')+encodeURIComponent(url);
 }
 
@@ -1260,7 +1262,8 @@ function cp2LoadImage(src){
 function cp2Download(){
   var pg=cp2ActivePage();if(!pg)return;
   var dims=CP2_PAPER[pg.paperSize]||CP2_PAPER.A4;
-  var scale=2;
+  var isMm=['A4','A5','B5','Letter'].indexOf(pg.paperSize)>=0;
+  var scale=isMm?(300/25.4):2;
   var W=dims[0],H=dims[1];
   var canvas=document.createElement('canvas');
   canvas.width=W*scale;canvas.height=H*scale;

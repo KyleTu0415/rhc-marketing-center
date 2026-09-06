@@ -1286,10 +1286,11 @@ def _call_coze_animal_workflow(prompt: str) -> str:
     return urls[0]
 
 
-def _white_to_transparent(img, threshold: int = 235, sat_limit: int = 18):
-    """纯白影棚背景 -> 透明RGBA。
-    从画布四边做连通泛洪，只去除与边界相连的白色区域（动物身上的白色不会误伤）；
-    紧贴动物轮廓的浅白像素做羽化半透明，避免白边。返回PIL RGBA图像。"""
+def _white_to_transparent(img, strong_thr: int = 242, strong_sat: int = 10,
+                          shadow_thr: int = 175, shadow_sat: int = 12):
+    """纯白影棚背景（含脚下灰色接触阴影）-> 透明RGBA。
+    两档判定+边界连通泛洪：死白背景为种子，允许扩散到与之连通的低饱和中性灰影子；
+    动物身上的白毛带色温（饱和度更高）且不与边界连通，不会被误抠。不做羽化，边缘干净。"""
     import numpy as np
     from collections import deque
     rgba = img.convert("RGBA")
@@ -1298,43 +1299,30 @@ def _white_to_transparent(img, threshold: int = 235, sat_limit: int = 18):
     rgb = arr[:, :, :3].astype(np.int16)
     mx = rgb.max(axis=2)
     mn = rgb.min(axis=2)
-    near_white = (mn >= threshold) & ((mx - mn) <= sat_limit)
+    sat = mx - mn
+    strong_bg = (mn >= strong_thr) & (sat <= strong_sat)   # 死白底
+    shadow_bg = (mn >= shadow_thr) & (sat <= shadow_sat)   # 中性灰接触阴影
 
     visited = np.zeros((h, w), dtype=bool)
     dq = deque()
+    def _seed(y, x):
+        if strong_bg[y, x] and not visited[y, x]:
+            visited[y, x] = True
+            dq.append((y, x))
     for x in range(w):
-        for y in (0, h - 1):
-            if near_white[y, x] and not visited[y, x]:
-                visited[y, x] = True
-                dq.append((y, x))
+        _seed(0, x); _seed(h - 1, x)
     for y in range(h):
-        for x in (0, w - 1):
-            if near_white[y, x] and not visited[y, x]:
-                visited[y, x] = True
-                dq.append((y, x))
+        _seed(y, 0); _seed(y, w - 1)
     while dq:
         y, x = dq.popleft()
         for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             ny, nx = y + dy, x + dx
-            if 0 <= ny < h and 0 <= nx < w and not visited[ny, nx] and near_white[ny, nx]:
-                visited[ny, nx] = True
-                dq.append((ny, nx))
+            if 0 <= ny < h and 0 <= nx < w and not visited[ny, nx]:
+                if strong_bg[ny, nx] or shadow_bg[ny, nx]:
+                    visited[ny, nx] = True
+                    dq.append((ny, nx))
 
     alpha = np.where(visited, 0, 255).astype(np.uint8)
-
-    # 轮廓边缘羽化：紧挨着透明背景的发白像素按白度降透明度，消除白毛边
-    bg_dil = visited.copy()
-    bg_dil[1:, :] |= visited[:-1, :]
-    bg_dil[:-1, :] |= visited[1:, :]
-    bg_dil[:, 1:] |= visited[:, :-1]
-    bg_dil[:, :-1] |= visited[:, 1:]
-    fringe = bg_dil & (~visited)
-    ys, xs = np.where(fringe)
-    for y, x in zip(ys, xs):
-        m, n = int(mx[y, x]), int(mn[y, x])
-        if m >= 205 and (m - n) <= 40:
-            alpha[y, x] = int(max(0, min(255, round((m - 205) / 30 * 255))))
-
     out = np.dstack([arr[:, :, :3], alpha])
     return Image.fromarray(out, "RGBA")
 
