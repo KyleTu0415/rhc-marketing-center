@@ -1322,6 +1322,27 @@ def _white_to_transparent(img, strong_thr: int = 242, strong_sat: int = 10,
                     visited[ny, nx] = True
                     dq.append((ny, nx))
 
+    # 残留深灰影子：与边界白底不直接连通的小面积灰色斑块（夹在四肢间的投影）。
+    # 用连通域面积过滤：影子是游离的小块（<2万像素），狗身体/爪子是大块，不会误伤。
+    fg_gray = (~visited) & (mn >= 50) & (mn < 205) & (sat <= 22)
+    lab = np.zeros((h, w), dtype=np.int32)
+    cur = 0
+    from collections import deque as _dq
+    for sy in range(h):
+        for sx in range(w):
+            if fg_gray[sy, sx] and lab[sy, sx] == 0:
+                cur += 1
+                q = _dq([(sy, sx)]); lab[sy, sx] = cur; cnt = 0
+                while q:
+                    y, x = q.popleft(); cnt += 1
+                    for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                        ny, nx = y + dy, x + dx
+                        if 0 <= ny < h and 0 <= nx < w and fg_gray[ny, nx] and lab[ny, nx] == 0:
+                            lab[ny, nx] = cur; q.append((ny, nx))
+                if cnt < 20000:
+                    ys_l, xs_l = np.where(lab == cur)
+                    visited[ys_l, xs_l] = True
+
     alpha = np.where(visited, 0, 255).astype(np.uint8)
     out = np.dstack([arr[:, :, :3], alpha])
     return Image.fromarray(out, "RGBA")
