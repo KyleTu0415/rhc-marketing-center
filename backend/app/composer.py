@@ -1344,6 +1344,15 @@ def _white_to_transparent(img, strong_thr: int = 242, strong_sat: int = 10,
                     visited[ys_l, xs_l] = True
 
     alpha = np.where(visited, 0, 255).astype(np.uint8)
+    # 形态学收边：对前景做2像素腐蚀，清掉边缘半透明毛边和贴边的细条残影
+    fg2d = alpha > 0
+    er = fg2d.copy()
+    for _ in range(2):
+        e2 = er.copy()
+        e2[1:, :] &= er[:-1, :]; e2[:-1, :] &= er[1:, :]
+        e2[:, 1:] &= er[:, :-1]; e2[:, :-1] &= er[:, 1:]
+        er = e2
+    alpha = np.where(er, 255, 0).astype(np.uint8)
     out = np.dstack([arr[:, :, :3], alpha])
     return Image.fromarray(out, "RGBA")
 
