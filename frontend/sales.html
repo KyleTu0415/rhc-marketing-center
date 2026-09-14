@@ -180,6 +180,23 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
 }
 .material-chip.selected .material-chip-check{display:block}
 
+/* ===== 模块内通知（商机线索） ===== */
+.ntf-list{display:flex;flex-direction:column}
+.ntf-item{display:flex;align-items:flex-start;gap:12px;padding:14px 20px;border-bottom:1px solid var(--color-border-light);transition:background var(--transition-fast)}
+.ntf-item:last-child{border-bottom:none}
+.ntf-item:hover{background:var(--color-border-light)}
+.ntf-dot{width:9px;height:9px;border-radius:50%;margin-top:6px;flex-shrink:0;background:#16A37B}
+.ntf-dot.read{background:transparent;border:1.5px solid var(--color-text-tertiary);width:8px;height:8px;margin-top:6px}
+.ntf-main{flex:1;min-width:0}
+.ntf-line1{display:flex;align-items:center;gap:8px;min-width:0}
+.ntf-title{font-size:13px;font-weight:700;color:var(--color-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+.ntf-item.read .ntf-title{font-weight:500}
+.ntf-tag{flex-shrink:0;font-size:10px;font-weight:600;padding:2px 8px;border-radius:4px;line-height:1.5;background:rgba(22,163,123,0.08);color:#16A37B}
+.ntf-summary{font-size:12.5px;color:var(--color-text-secondary);line-height:1.6;margin:5px 0 7px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap}
+.ntf-meta{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.ntf-time{font-size:12px;color:var(--color-text-tertiary)}
+.ntf-actions{display:flex;gap:8px;margin-left:auto}
+
 /* ===== 商机信号 / 客户分级 通用条目样式 ===== */
 .intel-item{padding:16px 0;border-bottom:1px solid var(--color-border-light)}
 .intel-item:last-child{border-bottom:none}
@@ -337,7 +354,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
     <div class="nav-item" data-page="mail" onclick="switchPage('mail',this)" role="button" tabindex="0"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg><span>邮件助手</span></div>
     <div class="nav-item" data-page="grading" onclick="switchPage('grading',this)" role="button" tabindex="0"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg><span>客户分级</span></div>
     <div class="nav-item" data-page="pi" onclick="switchPage('pi',this)" role="button" tabindex="0"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg><span>PI工作台</span></div>
-    <a class="nav-item" href="messages.html"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg><span>消息中心</span><span class="msg-badge" id="sidebar-msg-badge" style="display:none;background:var(--color-danger);color:#fff;border-radius:10px;padding:1px 6px;font-size:10px;font-weight:700;margin-left:auto"></span></a>
+    <div class="nav-item" data-page="notify" onclick="switchPage('notify',this)" role="button" tabindex="0"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg><span>通知</span><span class="msg-badge" id="sales-notify-badge" style="display:none;background:var(--color-danger);color:#fff;border-radius:10px;padding:1px 6px;font-size:10px;font-weight:700;margin-left:auto">0</span></div>
     <div class="nav-item nav-item-back-home" onclick="window.location.href='panel.html'" role="button" tabindex="0"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg><span>返回门户</span></div>
   </div>
 </nav>
@@ -530,6 +547,20 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
     </div>
     </section>
 
+    <section class="page" id="page-notify">
+    <div class="page-header">
+      <div><h2>通知</h2><p>商机线索与任务提醒</p></div>
+      <div class="page-header-actions">
+        <button class="btn btn-outline btn-sm" onclick="markAllSalesNotify()">全部已读</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-body" id="sales-notify-list" style="padding:0">
+        <div class="loading-state"><div class="spin"></div><div>正在加载商机通知…</div></div>
+      </div>
+    </div>
+    </section>
+
   </main>
 </div>
 </div>
@@ -710,7 +741,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
 <script src="assets/rhc-config.js"></script>
 <script src="assets/rhc-insights.js?v=20260903a"></script>
 <script>
-function switchPage(pageId,el){document.querySelectorAll('.page').forEach(function(p){p.classList.remove('active')});var t=document.getElementById('page-'+pageId);if(t){t.classList.remove('active');void t.offsetWidth;t.classList.add('active')}document.querySelectorAll('.sidebar-nav .nav-item').forEach(function(n){n.classList.remove('active')});if(el)el.classList.add('active');var ca=document.querySelector('.content-area');if(ca)ca.scrollTop=0}
+function switchPage(pageId,el){document.querySelectorAll('.page').forEach(function(p){p.classList.remove('active')});var t=document.getElementById('page-'+pageId);if(t){t.classList.remove('active');void t.offsetWidth;t.classList.add('active')}document.querySelectorAll('.sidebar-nav .nav-item').forEach(function(n){n.classList.remove('active')});if(el)el.classList.add('active');var ca=document.querySelector('.content-area');if(ca)ca.scrollTop=0;if(pageId==='notify'&&typeof loadSalesNotify==='function'){loadSalesNotify();loadSalesNotifyBadge();}}
 document.querySelectorAll('.sidebar-nav .nav-item').forEach(function(item){item.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();item.click()}})});
 /* ===== 产品清单（内置兜底，均为 RHC 真实在售产品；接口可用时以 /api/products 返回为准） ===== */
 var PRODUCTS=[
@@ -2399,21 +2430,102 @@ function escHtml(s){
   return d.innerHTML;
 }
 
-/* ===== Sidebar Message Badge ===== */
-(function(){
-  var token = localStorage.getItem('rhc_auth_token');
-  if (!token) return;
-  fetch('/api/messages/unread-count', { headers: { 'Authorization': 'Bearer ' + token } })
-    .then(function(r){ return r.json(); })
-    .then(function(d){
-      var badge = document.getElementById('sidebar-msg-badge');
-      if (badge && d.count > 0) {
-        badge.textContent = d.count > 99 ? '99+' : d.count;
-        badge.style.display = '';
-      }
+/* ===== 模块内通知：仅商机线索 ===== */
+var salesNotifyMsgs=[];
+function salesNotifyEsc(v){ var d=document.createElement('div'); d.textContent=(v==null?'':String(v)); return d.innerHTML; }
+function salesNotifyTime(dateStr){
+  if(!dateStr) return '';
+  var d=new Date((dateStr||'').replace(/-/g,'/'));
+  if(isNaN(d.getTime())) return dateStr;
+  var diff=Date.now()-d.getTime();
+  var mins=Math.floor(diff/60000);
+  if(mins<1) return '刚刚';
+  if(mins<60) return mins+'分钟前';
+  var hours=Math.floor(mins/60);
+  if(hours<24) return hours+'小时前';
+  var days=Math.floor(hours/24);
+  if(days<7) return days+'天前';
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+function salesNotifyUnread(m){ return (m.status||'未读')!=='已读'; }
+function salesNotifyAuthHeaders(json){
+  var h={'Authorization':'Bearer '+(localStorage.getItem('rhc_auth_token')||'')};
+  if(json) h['Content-Type']='application/json';
+  return h;
+}
+function renderSalesNotify(){
+  var box=document.getElementById('sales-notify-list');
+  if(!box) return;
+  if(!salesNotifyMsgs.length){
+    box.innerHTML='<div class="empty-state" style="padding:56px 24px"><div class="es-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--color-primary)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></div><div class="es-title">暂无商机通知</div><div class="es-desc">新的线索推送会显示在这里</div></div>';
+    return;
+  }
+  var html='<div class="ntf-list">';
+  for(var i=0;i<salesNotifyMsgs.length;i++){
+    var m=salesNotifyMsgs[i];
+    var unread=salesNotifyUnread(m);
+    html+='<div class="ntf-item'+(unread?'':' read')+'" id="ntf-item-'+i+'">'
+      +'<span class="ntf-dot'+(unread?'':' read')+'"></span>'
+      +'<div class="ntf-main">'
+      +  '<div class="ntf-line1"><span class="ntf-title">'+salesNotifyEsc(m.title)+'</span><span class="ntf-tag">商机</span></div>'
+      +  (m.content||m.summary?'<div class="ntf-summary">'+salesNotifyEsc(m.content||m.summary)+'</div>':'')
+      +  '<div class="ntf-meta"><span class="ntf-time">'+salesNotifyTime(m.created_at)+'</span>'
+      +    '<div class="ntf-actions">'
+      +      '<button type="button" class="btn btn-primary btn-sm" onclick="event.stopPropagation();salesNotifyGotoSignal()">加入跟进</button>'
+      +      '<button type="button" class="btn btn-outline btn-sm" onclick="event.stopPropagation();markSalesNotifyRead('+i+')">查看详情</button>'
+      +    '</div>'
+      +  '</div>'
+      +'</div></div>';
+  }
+  html+='</div>';
+  box.innerHTML=html;
+}
+function loadSalesNotify(){
+  var box=document.getElementById('sales-notify-list');
+  if(box) box.innerHTML='<div class="loading-state"><div class="spin"></div><div>正在加载商机通知…</div></div>';
+  fetch('/api/messages?type='+encodeURIComponent('商机线索'),{headers:salesNotifyAuthHeaders(false),cache:'no-store'})
+    .then(function(r){return r.json();})
+    .then(function(data){
+      salesNotifyMsgs=data.items||data.messages||data||[];
+      renderSalesNotify();
     })
-    .catch(function(){});
-})();
+    .catch(function(){ if(box) box.innerHTML='<div class="empty-state" style="padding:48px 24px"><div class="es-title">通知加载失败</div><div class="es-desc">请刷新页面重试</div></div>'; });
+}
+function loadSalesNotifyBadge(){
+  var badge=document.getElementById('sales-notify-badge');
+  if(!badge) return;
+  fetch('/api/messages/unread-count?type='+encodeURIComponent('商机线索'),{headers:salesNotifyAuthHeaders(false),cache:'no-store'})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var c=d.count||0;
+      if(c>0){badge.textContent=c>99?'99+':c;badge.style.display='';}
+      else{badge.textContent='0';badge.style.display='none';}
+    }).catch(function(){});
+}
+function markSalesNotifyRead(i){
+  var m=salesNotifyMsgs[i];
+  if(!m||!salesNotifyUnread(m)) return;
+  fetch('/api/messages/'+encodeURIComponent(m.record_id)+'/read',{method:'PUT',headers:salesNotifyAuthHeaders(false)})
+    .then(function(r){ if(!r.ok) throw new Error('fail');
+      m.status='已读';
+      renderSalesNotify();
+      loadSalesNotifyBadge();
+    }).catch(function(){ showToast('操作失败，请重试','error'); });
+}
+function markAllSalesNotify(){
+  fetch('/api/messages/read-all',{method:'POST',headers:salesNotifyAuthHeaders(true)})
+    .then(function(r){ if(!r.ok) throw new Error('fail');
+      for(var i=0;i<salesNotifyMsgs.length;i++) salesNotifyMsgs[i].status='已读';
+      renderSalesNotify();
+      loadSalesNotifyBadge();
+      showToast('已全部标记为已读','success');
+    }).catch(function(){ showToast('操作失败，请重试','error'); });
+}
+function salesNotifyGotoSignal(){
+  var nav=document.querySelector('.sidebar-nav .nav-item[data-page="signals"]');
+  if(nav) switchPage('signals',nav);
+}
+loadSalesNotifyBadge();
 
 /* ===== Search New Leads ===== */
 function searchNewLeads() {

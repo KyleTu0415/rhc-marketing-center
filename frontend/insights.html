@@ -171,7 +171,6 @@ a.news-card-title:hover{color:var(--color-primary)}
   <div class="topbar-divider"></div>
   <span class="topbar-title">市场洞察</span>
   <button class="topbar-back" onclick="location.href='panel.html'">← 返回门户</button>
-  <a href="messages.html" style="display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:20px;font-size:12px;font-weight:600;color:var(--color-text-secondary);background:var(--color-surface);border:1px solid var(--color-border);text-decoration:none;transition:all 0.15s ease;position:relative">🔔 消息中心<span id="sidebar-msg-badge" style="display:none;background:var(--color-danger);color:#fff;border-radius:10px;padding:1px 6px;font-size:10px;font-weight:700;margin-left:4px"></span></a>
 </div>
 
 <div class="page">
@@ -581,21 +580,6 @@ document.addEventListener('DOMContentLoaded', function(){
   }, 10 * 60 * 1000);
 });
 
-/* ===== Sidebar Message Badge ===== */
-(function(){
-  var token = localStorage.getItem('rhc_auth_token');
-  if (!token) return;
-  fetch('/api/messages/unread-count', { headers: { 'Authorization': 'Bearer ' + token } })
-    .then(function(r){ return r.json(); })
-    .then(function(d){
-      var badge = document.getElementById('sidebar-msg-badge');
-      if (badge && d.count > 0) {
-        badge.textContent = d.count > 99 ? '99+' : d.count;
-        badge.style.display = '';
-      }
-    })
-    .catch(function(){});
-})();
 </script>
 <script src="assets/rhc-widget.js?v=20260831hv"></script>
 </body>

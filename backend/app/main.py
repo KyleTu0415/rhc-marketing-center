@@ -2920,8 +2920,12 @@ class CreateMessageRequest(BaseModel):
 
 
 @app.get("/api/messages")
-async def api_messages_list(request: Request, status: str = ""):
-    """获取消息列表，支持 ?status=unread 过滤未读。需登录。"""
+async def api_messages_list(request: Request, status: str = "", type: str = ""):
+    """获取消息列表，支持 ?status=unread 过滤未读、?type=商机线索 按类型过滤。需登录。
+
+    type 支持传入单个类型（如 ?type=商机线索），也支持逗号分隔多个类型
+    （如 ?type=商机线索,系统通知），用于模块内通知只拉取本模块相关消息。
+    """
     token = _get_token_from_request(request)
     user_info = _verify_token(token) if token else None
     if not user_info:
@@ -2931,6 +2935,11 @@ async def api_messages_list(request: Request, status: str = ""):
         # 按状态过滤
         if status and status.lower() == "unread":
             messages = [m for m in messages if m.get("status") == "未读"]
+        # 按类型过滤（支持逗号分隔多个类型）
+        if type:
+            wanted_types = {t.strip() for t in type.split(",") if t.strip()}
+            if wanted_types:
+                messages = [m for m in messages if m.get("type") in wanted_types]
         # 按接收人过滤（"全部销售"对所有人生效，否则匹配当前用户姓名）
         my_name = user_info.get("name", "")
         filtered = []
@@ -2946,18 +2955,27 @@ async def api_messages_list(request: Request, status: str = ""):
 
 
 @app.get("/api/messages/unread-count")
-async def api_messages_unread_count(request: Request):
-    """获取当前用户未读消息数量。需登录。"""
+async def api_messages_unread_count(request: Request, type: str = ""):
+    """获取当前用户未读消息数量。需登录。
+
+    支持 ?type=商机线索 按类型统计（模块内通知角标用），也支持逗号分隔多类型。
+    """
     token = _get_token_from_request(request)
     user_info = _verify_token(token) if token else None
     if not user_info:
         return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
     try:
         messages = _fetch_messages(force_refresh=True)
+        # 按类型过滤（支持逗号分隔多个类型）
+        wanted_types = None
+        if type:
+            wanted_types = {t.strip() for t in type.split(",") if t.strip()}
         my_name = user_info.get("name", "")
         unread = 0
         for m in messages:
             if m.get("status") != "未读":
+                continue
+            if wanted_types and m.get("type") not in wanted_types:
                 continue
             receiver = m.get("receiver", "")
             if not receiver or receiver == "全部销售" or receiver == "全部" or \

@@ -461,6 +461,46 @@ button{font-family:var(--font-sans);cursor:pointer;border:none;background:none;f
 .toast-error{background:#E5484D}
 .toast-warning{background:var(--color-warning)}
 
+/* ===== Notification Dropdown Panel ===== */
+.notification-bell:hover{background:var(--color-border-light)}
+.notif-panel{
+  position:absolute;top:44px;right:0;width:360px;max-width:calc(100vw - 24px);
+  max-height:480px;display:none;flex-direction:column;
+  background:var(--color-surface);border:1px solid var(--color-border);
+  border-radius:var(--radius-md);box-shadow:var(--shadow-lg);z-index:200;overflow:hidden;
+}
+.notif-panel.open{display:flex}
+.notif-panel-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:13px 16px;border-bottom:1px solid var(--color-border-light);flex-shrink:0;
+}
+.notif-panel-title{font-size:14px;font-weight:700;color:var(--color-text)}
+.notif-readall{font-size:12px;font-weight:600;color:var(--color-primary);background:none;border:none;cursor:pointer;padding:2px 4px}
+.notif-readall:hover{text-decoration:underline}
+.notif-panel-body{flex:1;min-height:0;overflow-y:auto}
+.notif-item{display:flex;align-items:flex-start;gap:10px;padding:11px 16px;cursor:pointer;transition:background var(--transition-fast)}
+.notif-item:hover{background:var(--color-border-light)}
+.notif-dot{width:8px;height:8px;border-radius:50%;margin-top:6px;flex-shrink:0}
+.notif-dot.read{background:transparent;border:1.5px solid var(--color-text-tertiary);width:7px;height:7px;margin-top:6px}
+.notif-main{flex:1;min-width:0}
+.notif-line1{display:flex;align-items:center;gap:8px;min-width:0}
+.notif-title{font-size:13px;color:var(--color-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+.notif-item.unread .notif-title{font-weight:700}
+.notif-tag{flex-shrink:0;font-size:10px;font-weight:600;padding:2px 7px;border-radius:4px;line-height:1.5}
+.nt-lead{background:rgba(22,163,123,0.08);color:#16A37B}
+.nt-system{background:rgba(59,130,246,0.08);color:#3B82F6}
+.nt-approval{background:rgba(243,169,75,0.08);color:#C77F1E}
+.nt-email{background:rgba(200,16,46,0.08);color:var(--color-primary)}
+.nt-unknown{background:#F0F2F3;color:#637089}
+.notif-time{font-size:11px;color:var(--color-text-tertiary);margin-top:3px}
+.notif-panel-footer{
+  display:block;text-align:center;padding:11px 0;flex-shrink:0;
+  font-size:12px;font-weight:600;color:var(--color-primary);
+  border-top:1px solid var(--color-border-light);
+}
+.notif-panel-footer:hover{background:var(--color-primary-xlight);text-decoration:none}
+.notif-empty{text-align:center;padding:44px 16px;font-size:13px;color:var(--color-text-tertiary)}
+
 /* ===== Responsive ===== */
 @media(max-width:960px){
   .news-grid{grid-template-columns:1fr}
@@ -497,9 +537,19 @@ button{font-family:var(--font-sans);cursor:pointer;border:none;background:none;f
     </div>
   </div>
   <div class="topnav-user">
-    <div class="notification-bell" onclick="window.location.href='messages.html'" title="消息中心" style="position:relative;cursor:pointer;width:36px;height:36px;display:flex;align-items:center;justify-content:center;border-radius:50%;transition:background var(--transition-fast)">
+    <div class="notification-bell" id="notif-bell" onclick="toggleNotifPanel(event)" title="通知" style="position:relative;cursor:pointer;width:36px;height:36px;display:flex;align-items:center;justify-content:center;border-radius:50%;transition:background var(--transition-fast)">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--color-text-secondary)"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
       <span class="badge" id="nav-bell-badge" style="display:none;position:absolute;top:2px;right:2px;min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--color-danger);color:#fff;font-size:10px;font-weight:700;line-height:16px;text-align:center">0</span>
+      <div class="notif-panel" id="notif-panel">
+        <div class="notif-panel-header">
+          <span class="notif-panel-title">通知</span>
+          <button type="button" class="notif-readall" onclick="markAllNotifRead()">全部已读</button>
+        </div>
+        <div class="notif-panel-body" id="notif-list">
+          <div class="notif-empty">正在加载通知…</div>
+        </div>
+        <a class="notif-panel-footer" href="messages.html">查看全部通知</a>
+      </div>
     </div>
     <div class="user-info">
       <div class="user-name">Ella</div>
@@ -1161,6 +1211,127 @@ function loadPanelMessages() {
     })
     .catch(function() {});
 }
+
+/* ===== Notification Dropdown Logic ===== */
+var NOTIF_TYPE_MAP = {
+  '商机线索': {color:'#16A37B', label:'商机', cls:'nt-lead'},
+  '系统通知': {color:'#3B82F6', label:'系统', cls:'nt-system'},
+  '审批通知': {color:'#F3A94B', label:'审批', cls:'nt-approval'},
+  '邮件通知': {color:'#C8102E', label:'邮件', cls:'nt-email'}
+};
+function notifTypeInfo(t){
+  return NOTIF_TYPE_MAP[t] || {color:'#9CA3AF', label:'其他', cls:'nt-unknown'};
+}
+function notifUnread(m){ return (m.status || '未读') !== '已读'; }
+function notifEsc(s){ var d=document.createElement('div'); d.textContent=(s==null?'':String(s)); return d.innerHTML; }
+function notifTime(dateStr){
+  if(!dateStr) return '';
+  var d=new Date((dateStr||'').replace(/-/g,'/'));
+  if(isNaN(d.getTime())) return dateStr;
+  var diff=Date.now()-d.getTime();
+  var mins=Math.floor(diff/60000);
+  if(mins<1) return '刚刚';
+  if(mins<60) return mins+'分钟前';
+  var hours=Math.floor(mins/60);
+  if(hours<24) return hours+'小时前';
+  var days=Math.floor(hours/24);
+  if(days<7) return days+'天前';
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+function updateBellBadge(){
+  var token=localStorage.getItem('rhc_auth_token');
+  var headers={};
+  if(token) headers['Authorization']='Bearer '+token;
+  fetch('/api/messages/unread-count',{headers:headers})
+    .then(function(r){return r.json();})
+    .then(function(data){
+      var count=data.count||0;
+      var badge=document.getElementById('nav-bell-badge');
+      if(badge){
+        if(count>0){badge.textContent=count>99?'99+':count;badge.style.display='';}
+        else{badge.style.display='none';}
+      }
+    }).catch(function(){});
+}
+function renderNotifList(msgs){
+  var box=document.getElementById('notif-list');
+  if(!box) return;
+  if(!msgs.length){box.innerHTML='<div class="notif-empty">暂无通知</div>';return;}
+  var html='';
+  for(var i=0;i<msgs.length;i++){
+    var m=msgs[i];
+    var info=notifTypeInfo(m.type);
+    var unread=notifUnread(m);
+    html+='<div class="notif-item'+(unread?' unread':' read')+'" id="notif-item-'+i+'" onclick="markNotifRead('+i+')">'
+      +'<span class="notif-dot'+(unread?'':' read')+'" style="'+(unread?'background:'+info.color:'')+'"></span>'
+      +'<div class="notif-main">'
+      +  '<div class="notif-line1"><span class="notif-title">'+notifEsc(m.title)+'</span><span class="notif-tag '+info.cls+'">'+info.label+'</span></div>'
+      +  '<div class="notif-time">'+notifTime(m.created_at)+'</div>'
+      +'</div></div>';
+  }
+  box.innerHTML=html;
+}
+function loadNotifMessages(){
+  var box=document.getElementById('notif-list');
+  if(box) box.innerHTML='<div class="notif-empty">正在加载通知…</div>';
+  var token=localStorage.getItem('rhc_auth_token');
+  var headers={};
+  if(token) headers['Authorization']='Bearer '+token;
+  fetch('/api/messages',{headers:headers,cache:'no-store'})
+    .then(function(r){return r.json();})
+    .then(function(data){
+      var msgs=data.items||data.messages||data||[];
+      window.__notifMsgs=(msgs||[]).slice(0,10);
+      renderNotifList(window.__notifMsgs);
+    })
+    .catch(function(){ if(box) box.innerHTML='<div class="notif-empty">通知加载失败，请稍后重试</div>'; });
+}
+function toggleNotifPanel(e){
+  if(e) e.stopPropagation();
+  var panel=document.getElementById('notif-panel');
+  if(!panel) return;
+  var open=panel.classList.toggle('open');
+  if(open) loadNotifMessages();
+}
+function closeNotifPanel(){
+  var panel=document.getElementById('notif-panel');
+  if(panel) panel.classList.remove('open');
+}
+function markNotifRead(idx){
+  var msgs=window.__notifMsgs||[];
+  var m=msgs[idx];
+  if(!m) return;
+  if(!notifUnread(m)) return;
+  var token=localStorage.getItem('rhc_auth_token');
+  var headers={};
+  if(token) headers['Authorization']='Bearer '+token;
+  fetch('/api/messages/'+encodeURIComponent(m.record_id)+'/read',{method:'PUT',headers:headers})
+    .then(function(r){ if(!r.ok) throw new Error('fail');
+      m.status='已读';
+      renderNotifList(msgs);
+      updateBellBadge();
+    }).catch(function(){});
+}
+function markAllNotifRead(){
+  var token=localStorage.getItem('rhc_auth_token');
+  var headers={'Content-Type':'application/json'};
+  if(token) headers['Authorization']='Bearer '+token;
+  fetch('/api/messages/read-all',{method:'POST',headers:headers})
+    .then(function(r){ if(!r.ok) throw new Error('fail');
+      var msgs=window.__notifMsgs||[];
+      for(var i=0;i<msgs.length;i++) msgs[i].status='已读';
+      renderNotifList(msgs);
+      updateBellBadge();
+      showToast('已全部标记为已读','success');
+    }).catch(function(){ showToast('操作失败，请重试','error'); });
+}
+document.addEventListener('click',function(e){
+  var bell=document.getElementById('notif-bell');
+  var panel=document.getElementById('notif-panel');
+  if(bell && panel && panel.classList.contains('open') && !bell.contains(e.target)){
+    closeNotifPanel();
+  }
+});
 
 // 初始化渲染
 document.addEventListener('DOMContentLoaded', function() {
