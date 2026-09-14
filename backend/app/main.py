@@ -2441,10 +2441,630 @@ try:
 except Exception as _e:
     print(f"[insights] 模块初始化失败: {_e}")
 
+# ============================================================
+# 主动获客搜索引擎（POST /api/leads/search）
+# 用 DuckDuckGo 搜索潜在客户（进口商/经销商/动物医院），
+# 去重已有线索，自动质量评级（A/B/C），搜索完自动推送消息通知。
+# ============================================================
+_SEARCH_PRODUCTS = [
+    "veterinary anesthesia machine",
+    "vet ventilator",
+    "veterinary injection pump",
+    "veterinary patient monitor",
+    "veterinary surgical equipment",
+    "animal hospital equipment",
+]
+_SEARCH_COUNTRIES = {
+    # 南美
+    "Brazil": "南美", "Argentina": "南美", "Colombia": "南美", "Chile": "南美",
+    # 非洲
+    "Nigeria": "非洲", "Kenya": "非洲", "South Africa": "非洲", "Egypt": "非洲",
+    "Ghana": "非洲", "Tanzania": "非洲",
+    # 欧洲
+    "Germany": "欧洲", "France": "欧洲", "UK": "欧洲", "Spain": "欧洲",
+    "Italy": "欧洲", "Poland": "欧洲", "Netherlands": "欧洲",
+    # 东南亚
+    "Thailand": "东南亚", "Vietnam": "东南亚", "Philippines": "东南亚",
+    "Indonesia": "东南亚", "Malaysia": "东南亚", "Myanmar": "东南亚",
+}
+_RHC_PRODUCTS = [
+    "RHC-V500 兽用麻醉机", "RHC-V300 兽用呼吸机",
+    "RHC-IP600 兽用注射泵", "RHC-PM800 兽用监护仪",
+    "RHC-SE200 兽用手术设备", "RHC-AH 动物医院整体方案",
+]
+
+_search_results_cache = {"data": None, "ts": 0.0}
+_SEARCH_CACHE_TTL = 30  # 搜索结果30秒缓存
+
+
+def _build_search_queries():
+    """构建搜索词列表：产品关键词 + 目标市场 + importer/distributor/hospital"""
+    queries = []
+    # 每个产品关键词 + 每个目标市场 组合太多，选取代表性组合
+    for product in _SEARCH_PRODUCTS[:3]:  # 取前3个核心产品
+        for country in list(_SEARCH_COUNTRIES.keys())[:8]:  # 每轮取8个市场
+            queries.append(f'"{product}" importer {country}')
+    # 补充经销商/医院类搜索
+    for product in _SEARCH_PRODUCTS[3:]:
+        for country in list(_SEARCH_COUNTRIES.keys())[8:16]:
+            queries.append(f'"{product}" distributor {country}')
+    # 动物医院搜索（覆盖更多市场）
+    for country in list(_SEARCH_COUNTRIES.keys()):
+        queries.append(f'animal hospital equipment supplier {country}')
+    return queries
+
+
+def _search_ddg_leads(query: str, timeout: int = 8) -> list:
+    """DuckDuckGo HTML搜索，返回 [{title, url, snippet}]"""
+    import urllib.parse as _up
+    import urllib.request as _ur
+    import urllib.error as _ue
+    q = _up.urlencode({"q": query})
+    url = "https://html.duckduckgo.com/html/?" + q
+    req = _ur.Request(url, headers={
+        "User-Agent": _FIND_UA,
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9",
+    })
+    results = []
+    try:
+        with _ur.urlopen(req, timeout=timeout) as r:
+            html_text = r.read(1_500_000).decode("utf-8", "ignore")
+        for m in re.finditer(
+                r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+                html_text, re.I):
+            href = _ddg_real_url(m.group(1))
+            title = re.sub(r'<[^>]+>', '', m.group(2)).strip()
+            if not href or not title:
+                continue
+            # 找对应的 snippet
+            snippet = ""
+            snip_match = re.search(
+                re.escape(href[:30]) + r'.*?<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
+                html_text, re.I | re.S)
+            if snip_match:
+                snippet = re.sub(r'<[^>]+>', '', snip_match.group(1)).strip()[:300]
+            results.append({"title": title, "url": href, "snippet": snippet})
+            if len(results) >= 8:
+                break
+    except _ue.HTTPError:
+        pass
+    except Exception:
+        pass
+    return results
+
+
+def _extract_company_info(title: str, snippet: str, url: str) -> dict:
+    """从搜索结果中提取公司信息"""
+    text = f"{title} {snippet}".lower()
+    # 提取公司名（title中第一个有意义的词组）
+    company = title.split("|")[0].split("-")[0].split(",")[0].strip()
+    # 去掉通用词
+    for word in ["veterinary", "animal", "hospital", "equipment", "supplier",
+                  "importer", "distributor", "wholesale", "official"]:
+        company = company.replace(word, " ").strip()
+    company = re.sub(r'\s+', ' ', company).strip()
+    if len(company) < 3:
+        company = title[:40].strip()
+
+    # 识别国家
+    country = ""
+    region = ""
+    for c, r in _SEARCH_COUNTRIES.items():
+        if c.lower() in text:
+            country = c
+            region = r
+            break
+
+    # 识别产品需求
+    demands = []
+    product_keywords = {
+        "anesthesia machine": "麻醉机", "ventilator": "呼吸机",
+        "injection pump": "注射泵", "patient monitor": "监护仪",
+        "surgical equipment": "手术设备", "hospital equipment": "医院设备",
+    }
+    for kw, cn in product_keywords.items():
+        if kw in text:
+            demands.append(cn)
+
+    # 判断是否明确采购意向
+    is_importer = any(w in text for w in ["import", "distributor", "dealer",
+                      "wholesale", "supplier", "procurement", "purchase", "buy"])
+    is_hospital = any(w in text for w in ["hospital", "clinic", "veterinary clinic",
+                    "animal care", "vet center"])
+
+    return {
+        "company_name": company[:80],
+        "country": country,
+        "region": region,
+        "product_demand": "、".join(demands) if demands else "兽用医疗设备",
+        "is_importer": is_importer,
+        "is_hospital": is_hospital,
+    }
+
+
+def _rate_lead_quality(info: dict) -> str:
+    """质量评级：A=明确进口/采购+目标市场匹配，B=动物医院+目标市场，C=其他"""
+    if info.get("is_importer") and info.get("country"):
+        return "A"
+    if info.get("is_hospital") and info.get("country"):
+        return "B"
+    if info.get("country"):
+        return "B"
+    return "C"
+
+
+def _recommend_product(demand: str) -> str:
+    """根据需求推荐RHC产品型号"""
+    if "麻醉机" in demand:
+        return _RHC_PRODUCTS[0]
+    if "呼吸机" in demand:
+        return _RHC_PRODUCTS[1]
+    if "注射泵" in demand:
+        return _RHC_PRODUCTS[2]
+    if "监护仪" in demand:
+        return _RHC_PRODUCTS[3]
+    if "手术" in demand:
+        return _RHC_PRODUCTS[4]
+    return _RHC_PRODUCTS[5]
+
+
+def _generate_ai_suggestion(lead: dict) -> str:
+    """生成一句话跟进建议"""
+    company = lead.get("company_name", "对方")
+    country = lead.get("country", "")
+    demand = lead.get("product_demand", "")
+    grade = lead.get("confidence", "C")
+    if grade == "A":
+        return f"{country}{company}有明确采购意向，建议优先WhatsApp/邮件联系，发送{demand}产品目录及报价"
+    elif grade == "B":
+        return f"建议通过官网邮箱发送产品介绍资料，重点展示{demand}在{country}市场的应用案例"
+    else:
+        return f"可先通过LinkedIn或展会了解{company}业务详情，再定向推荐{demand}产品"
+
+
+def _dedup_with_existing_leads(new_leads: list, existing_leads: list) -> list:
+    """与飞书线索表中已有线索去重（按公司名+URL），返回去重后的新线索"""
+    existing_keys = set()
+    for ld in existing_leads:
+        company = (ld.get("公司/机构") or ld.get("company", "") or "").strip().lower()
+        url = (ld.get("原文链接") or ld.get("url") or "").strip().lower()
+        if company:
+            existing_keys.add(company)
+        if url:
+            existing_keys.add(url)
+    deduped = []
+    for lead in new_leads:
+        company_key = lead.get("company_name", "").lower().strip()
+        url_key = lead.get("website", "").lower().strip()
+        if company_key and company_key in existing_keys:
+            continue
+        if url_key and url_key in existing_keys:
+            continue
+        deduped.append(lead)
+    return deduped
+
+
+def _run_lead_search(max_results: int = 30) -> list:
+    """执行主动搜索核心逻辑，返回结构化线索列表"""
+    queries = _build_search_queries()
+    all_raw = []  # [{title, url, snippet}]
+    seen_urls = set()
+    # 限制搜索轮次，避免超时
+    max_queries = min(len(queries), 20)
+    for i, query in enumerate(queries[:max_queries]):
+        results = _search_ddg_leads(query, timeout=6)
+        for r in results:
+            url = r.get("url", "").lower().strip()
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                r["_query"] = query
+                all_raw.append(r)
+        if len(all_raw) >= max_results * 2:
+            break
+        # 每轮搜索间隔，避免被封
+        if i > 0 and i % 5 == 0:
+            time.sleep(0.5)
+
+    # 提取公司信息
+    leads = []
+    seen_companies = set()
+    for r in all_raw:
+        info = _extract_company_info(r["title"], r.get("snippet", ""), r["url"])
+        if not info["company_name"] or len(info["company_name"]) < 3:
+            continue
+        company_key = info["company_name"].lower().strip()
+        if company_key in seen_companies:
+            continue
+        seen_companies.add(company_key)
+        grade = _rate_lead_quality(info)
+        lead = {
+            "company_name": info["company_name"],
+            "country": info["country"] or "未知",
+            "region": info["region"] or "其他",
+            "product_demand": info["product_demand"],
+            "recommended_product": _recommend_product(info["product_demand"]),
+            "website": r["url"],
+            "email": "",
+            "phone": "",
+            "whatsapp": "",
+            "source": f"DuckDuckGo搜索: {r.get('_query', '')[:60]}",
+            "confidence": grade,
+            "ai_suggestion": "",
+        }
+        lead["ai_suggestion"] = _generate_ai_suggestion(lead)
+        leads.append(lead)
+        if len(leads) >= max_results:
+            break
+
+    # 按质量排序 A > B > C
+    grade_order = {"A": 0, "B": 1, "C": 2}
+    leads.sort(key=lambda x: grade_order.get(x.get("confidence", "C"), 3))
+    return leads
+
+
+class LeadSearchRequest(BaseModel):
+    max_results: Optional[int] = 30
+    force_refresh: Optional[bool] = False
+
+
+@app.post("/api/leads/search")
+async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = None):
+    """AI主动搜索全网潜在客户，返回结构化线索列表。
+    自动去重已有线索、质量评级、生成跟进建议。需登录。"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info:
+        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+
+    max_results = 30
+    force_refresh = False
+    if req:
+        max_results = min(req.max_results or 30, 50)
+        force_refresh = req.force_refresh or False
+
+    # 缓存检查
+    now = time.time()
+    if not force_refresh and _search_results_cache["data"] is not None \
+            and now - _search_results_cache["ts"] < _SEARCH_CACHE_TTL:
+        return {"ok": True, "items": _search_results_cache["data"],
+                "total": len(_search_results_cache["data"]),
+                "cached": True}
+
+    try:
+        # 1) 执行搜索
+        raw_leads = _run_lead_search(max_results=max_results)
+
+        # 2) 与已有线索去重
+        try:
+            existing_leads = _fetch_leads(force_refresh=True)
+        except Exception:
+            existing_leads = []
+        new_leads = _dedup_with_existing_leads(raw_leads, existing_leads)
+
+        # 3) 缓存结果
+        _search_results_cache["data"] = new_leads
+        _search_results_cache["ts"] = time.time()
+
+        # 4) 为每条新线索自动创建消息通知（后台线程，不阻塞返回）
+        if new_leads:
+            def _create_messages():
+                try:
+                    msg_tid = _ensure_messages_table()
+                    now_iso = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+                    for lead in new_leads[:10]:  # 最多创建10条消息，避免写入过多
+                        grade = lead.get("confidence", "C")
+                        grade_emoji = "🔴" if grade == "A" else ("🟡" if grade == "B" else "⚪")
+                        title = f"{grade_emoji} 新商机线索: {lead['company_name']}（{lead['country']}）"
+                        content = (
+                            f"公司: {lead['company_name']}\n"
+                            f"国家: {lead['country']} | 地区: {lead['region']}\n"
+                            f"需求: {lead['product_demand']}\n"
+                            f"推荐产品: {lead['recommended_product']}\n"
+                            f"质量评级: {grade}级\n"
+                            f"官网: {lead.get('website', '未知')}\n"
+                            f"跟进建议: {lead.get('ai_suggestion', '')}"
+                        )
+                        fields = {
+                            "消息标题": title,
+                            "消息类型": "商机线索",
+                            "消息内容": content[:2000],
+                            "接收人": "全部销售",
+                            "已读状态": "未读",
+                            "关联线索ID": "",
+                            "创建时间": now_iso,
+                        }
+                        try:
+                            _feishu_api(
+                                "POST",
+                                f"/bitable/v1/apps/{FEISHU_ATK}/tables/{msg_tid}/records",
+                                {"fields": fields})
+                        except Exception as we:
+                            print(f"[messages] 自动创建消息失败: {we}")
+                except Exception as e:
+                    print(f"[messages] 搜索后自动推送消息失败: {e}")
+            threading.Thread(target=_create_messages, daemon=True).start()
+
+        # 统计
+        a_count = sum(1 for l in new_leads if l.get("confidence") == "A")
+        b_count = sum(1 for l in new_leads if l.get("confidence") == "B")
+        c_count = sum(1 for l in new_leads if l.get("confidence") == "C")
+
+        return {
+            "ok": True,
+            "items": new_leads,
+            "total": len(new_leads),
+            "cached": False,
+            "stats": {
+                "total_found": len(raw_leads),
+                "new_after_dedup": len(new_leads),
+                "a_grade": a_count,
+                "b_grade": b_count,
+                "c_grade": c_count,
+            },
+            "search_time": datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    except Exception as e:
+        print(f"[search] 主动搜索失败: {e}")
+        return JSONResponse({"ok": False, "message": f"搜索失败：{e}"}, status_code=502)
+
+
+# ============================================================
+# 消息通知系统（飞书「消息通知」表 + 4个API端点）
+# 门户右上角消息铃铛：未读计数、列表、标记已读、全部已读
+# ============================================================
+MESSAGES_TABLE_NAME = "消息通知"
+MESSAGE_TYPE_OPTIONS = ("商机线索", "系统通知", "审批通知", "邮件通知")
+MESSAGE_STATUS_OPTIONS = ("未读", "已读")
+
+_messages_table_id = None
+_messages_cache = {"data": None, "ts": 0.0}
+_MESSAGES_CACHE_TTL = 30
+
+
+def _ensure_messages_table():
+    """确保多维表中存在「消息通知」表，返回 table_id；不存在则自动创建。"""
+    global _messages_table_id
+    if _messages_table_id:
+        return _messages_table_id
+    if not FEISHU_ATK:
+        raise RuntimeError("FEISHU_APP_TOKEN 未配置")
+    resp = _feishu_api("GET", f"/bitable/v1/apps/{FEISHU_ATK}/tables?page_size=100")
+    for t in resp.get("data", {}).get("items", []):
+        if t.get("name") == MESSAGES_TABLE_NAME:
+            _messages_table_id = t.get("table_id")
+            return _messages_table_id
+    fields = [
+        {"field_name": "消息标题", "type": 1},   # 文本（主字段）
+        {"field_name": "消息类型", "type": 3,    # 单选
+         "property": {"options": [{"name": n} for n in MESSAGE_TYPE_OPTIONS]}},
+        {"field_name": "消息内容", "type": 1},   # 文本
+        {"field_name": "接收人", "type": 1},     # 文本
+        {"field_name": "已读状态", "type": 3,    # 单选
+         "property": {"options": [{"name": n} for n in MESSAGE_STATUS_OPTIONS]}},
+        {"field_name": "关联线索ID", "type": 1}, # 文本
+        {"field_name": "创建时间", "type": 1},   # 文本
+    ]
+    resp = _feishu_api("POST", f"/bitable/v1/apps/{FEISHU_ATK}/tables",
+                       {"table": {"name": MESSAGES_TABLE_NAME,
+                                  "default_view_name": "消息列表",
+                                  "fields": fields}})
+    _messages_table_id = resp.get("data", {}).get("table_id")
+    if not _messages_table_id:
+        raise RuntimeError(f"创建「{MESSAGES_TABLE_NAME}」表失败: {resp}")
+    print(f"[messages] 已创建飞书消息表「{MESSAGES_TABLE_NAME}」: {_messages_table_id}")
+    return _messages_table_id
+
+
+def _norm_message_record(rec: dict) -> dict:
+    """飞书记录 -> 归一化消息字段"""
+    fl = rec.get("fields", {})
+    return {
+        "record_id": rec.get("record_id", ""),
+        "title": _tv(fl.get("消息标题")),
+        "type": _tv(fl.get("消息类型")),
+        "content": _tv(fl.get("消息内容")),
+        "receiver": _tv(fl.get("接收人")),
+        "status": _tv(fl.get("已读状态")) or "未读",
+        "lead_id": _tv(fl.get("关联线索ID")),
+        "created_at": _tv(fl.get("创建时间")),
+    }
+
+
+def _fetch_messages(force_refresh=False) -> list:
+    """读取消息表全部记录（按创建时间倒序），30秒缓存。"""
+    now = time.time()
+    if not force_refresh and _messages_cache["data"] is not None \
+            and now - _messages_cache["ts"] < _MESSAGES_CACHE_TTL:
+        return list(_messages_cache["data"])
+    tid = _ensure_messages_table()
+    items = []
+    page_token = None
+    while True:
+        path = f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records?page_size=100"
+        if page_token:
+            path += f"&page_token={page_token}"
+        resp = _feishu_api("GET", path)
+        data = resp.get("data", {})
+        for it in data.get("items", []):
+            items.append(_norm_message_record(it))
+        if not data.get("has_more"):
+            break
+        page_token = data.get("page_token")
+    items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    _messages_cache["data"] = items
+    _messages_cache["ts"] = now
+    return list(items)
+
+
+def _invalidate_messages_cache():
+    _messages_cache["data"] = None
+    _messages_cache["ts"] = 0.0
+
+
+def _warmup_messages_table():
+    """启动后台预热消息表"""
+    try:
+        _fetch_messages(force_refresh=True)
+        print(f"[messages] 飞书消息表初始化完成（{len(_messages_cache['data'] or [])} 条）")
+    except Exception as e:
+        print(f"[messages] 飞书消息表初始化失败（接口调用时将自动重试）: {e}")
+
+
+class CreateMessageRequest(BaseModel):
+    title: str = ""
+    type: str = "系统通知"
+    content: str = ""
+    receiver: str = ""
+    lead_id: str = ""
+
+
+@app.get("/api/messages")
+async def api_messages_list(request: Request, status: str = ""):
+    """获取消息列表，支持 ?status=unread 过滤未读。需登录。"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info:
+        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    try:
+        messages = _fetch_messages(force_refresh=True)
+        # 按状态过滤
+        if status and status.lower() == "unread":
+            messages = [m for m in messages if m.get("status") == "未读"]
+        # 按接收人过滤（"全部销售"对所有人生效，否则匹配当前用户姓名）
+        my_name = user_info.get("name", "")
+        filtered = []
+        for m in messages:
+            receiver = m.get("receiver", "")
+            if not receiver or receiver == "全部销售" or receiver == "全部" or \
+                    my_name in receiver or user_info.get("username", "") in receiver:
+                filtered.append(m)
+        return {"ok": True, "items": filtered, "total": len(filtered)}
+    except Exception as e:
+        print(f"[messages] 读取消息列表失败: {e}")
+        return JSONResponse({"ok": False, "message": f"读取消息失败：{e}"}, status_code=502)
+
+
+@app.get("/api/messages/unread-count")
+async def api_messages_unread_count(request: Request):
+    """获取当前用户未读消息数量。需登录。"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info:
+        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    try:
+        messages = _fetch_messages(force_refresh=True)
+        my_name = user_info.get("name", "")
+        unread = 0
+        for m in messages:
+            if m.get("status") != "未读":
+                continue
+            receiver = m.get("receiver", "")
+            if not receiver or receiver == "全部销售" or receiver == "全部" or \
+                    my_name in receiver or user_info.get("username", "") in receiver:
+                unread += 1
+        return {"ok": True, "count": unread}
+    except Exception as e:
+        print(f"[messages] 读取未读计数失败: {e}")
+        return JSONResponse({"ok": False, "message": f"读取未读计数失败：{e}"}, status_code=502)
+
+
+@app.put("/api/messages/{record_id}/read")
+async def api_messages_mark_read(record_id: str, request: Request):
+    """标记单条消息为已读。需登录。"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info:
+        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    try:
+        tid = _ensure_messages_table()
+        _feishu_api(
+            "PUT",
+            f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records/{record_id}",
+            {"fields": {"已读状态": "已读"}})
+        _invalidate_messages_cache()
+        return {"ok": True, "message": "已标记为已读"}
+    except Exception as e:
+        print(f"[messages] 标记已读失败（{record_id}）: {e}")
+        return JSONResponse({"ok": False, "message": f"标记已读失败：{e}"}, status_code=502)
+
+
+@app.post("/api/messages/read-all")
+async def api_messages_read_all(request: Request):
+    """标记当前用户所有消息为已读（批量更新）。需登录。"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info:
+        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    try:
+        messages = _fetch_messages(force_refresh=True)
+        tid = _ensure_messages_table()
+        my_name = user_info.get("name", "")
+        updated = 0
+        for m in messages:
+            if m.get("status") != "未读":
+                continue
+            receiver = m.get("receiver", "")
+            if not receiver or receiver == "全部销售" or receiver == "全部" or \
+                    my_name in receiver or user_info.get("username", "") in receiver:
+                try:
+                    _feishu_api(
+                        "PUT",
+                        f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records/{m['record_id']}",
+                        {"fields": {"已读状态": "已读"}})
+                    updated += 1
+                except Exception:
+                    pass
+        _invalidate_messages_cache()
+        return {"ok": True, "message": f"已标记 {updated} 条消息为已读", "updated": updated}
+    except Exception as e:
+        print(f"[messages] 全部标记已读失败: {e}")
+        return JSONResponse({"ok": False, "message": f"标记已读失败：{e}"}, status_code=502)
+
+
+@app.post("/api/messages")
+async def api_messages_create(req: CreateMessageRequest, request: Request):
+    """手动创建消息通知（系统通知/审批通知等）。需登录，admin可发给指定人。"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info:
+        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    title = (req.title or "").strip()
+    if not title:
+        return JSONResponse({"ok": False, "message": "消息标题不能为空"}, status_code=400)
+    msg_type = (req.type or "系统通知").strip()
+    if msg_type not in MESSAGE_TYPE_OPTIONS:
+        return JSONResponse({"ok": False, "message": f"消息类型仅支持：{'/'.join(MESSAGE_TYPE_OPTIONS)}"},
+                            status_code=400)
+    try:
+        tid = _ensure_messages_table()
+        now_iso = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+        fields = {
+            "消息标题": title,
+            "消息类型": msg_type,
+            "消息内容": (req.content or "")[:2000],
+            "接收人": (req.receiver or "全部销售").strip(),
+            "已读状态": "未读",
+            "关联线索ID": (req.lead_id or "").strip(),
+            "创建时间": now_iso,
+        }
+        resp = _feishu_api(
+            "POST",
+            f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records",
+            {"fields": fields})
+        _invalidate_messages_cache()
+        rec = resp.get("data", {}).get("record", {})
+        return {"ok": True, "message": _norm_message_record(rec) if rec else fields}
+    except Exception as e:
+        print(f"[messages] 创建消息失败: {e}")
+        return JSONResponse({"ok": False, "message": f"创建消息失败：{e}"}, status_code=502)
+
 # 启动时后台预热飞书「系统账号」表（建表+种子数据），不阻塞服务启动
 threading.Thread(target=_warmup_account_table, daemon=True).start()
 # 启动时后台预热飞书「商机线索」表（自动建表），不阻塞服务启动
 threading.Thread(target=_warmup_leads_table, daemon=True).start()
+# 启动时后台预热飞书「消息通知」表（自动建表），不阻塞服务启动
+threading.Thread(target=_warmup_messages_table, daemon=True).start()
 
 # Serve frontend - try multiple possible locations
 _candidate_dirs = [

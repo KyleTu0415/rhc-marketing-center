@@ -279,6 +279,52 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
   .content-area{padding:16px}
   .quote-grid{grid-template-columns:1fr}
 }
+
+/* ===== Search Lead Cards ===== */
+.search-lead-card{
+  background:var(--color-surface);
+  border:1px solid var(--color-border);
+  border-radius:var(--radius-md);
+  margin-bottom:16px;
+  overflow:hidden;
+}
+.search-lead-card:last-child{margin-bottom:0}
+.slc-header{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:10px 16px;
+  background:var(--color-bg);
+  border-bottom:1px solid var(--color-border-light);
+  font-size:12px;font-weight:600;
+}
+.slc-grade{
+  display:inline-flex;align-items:center;gap:4px;
+  padding:2px 10px;border-radius:20px;font-size:11px;font-weight:700;
+}
+.slc-grade.grade-a{background:#E6F9F1;color:#0D7B57}
+.slc-grade.grade-b{background:#E8F0FE;color:#1A56C4}
+.slc-grade.grade-c{background:#F0F2F3;color:#637089}
+.slc-region{
+  display:inline-flex;padding:2px 8px;border-radius:4px;
+  font-size:11px;font-weight:500;
+  background:var(--color-surface);border:1px solid var(--color-border-light);
+  color:var(--color-text-secondary);
+}
+.slc-date{color:var(--color-text-tertiary);font-weight:400;margin-left:auto}
+.slc-body{padding:14px 16px}
+.slc-company{font-size:14px;font-weight:700;color:var(--color-text);margin-bottom:4px}
+.slc-desc{font-size:12px;color:var(--color-text-secondary);margin-bottom:12px}
+.slc-section{margin-bottom:10px}
+.slc-section-title{font-size:12px;font-weight:600;color:var(--color-text-secondary);margin-bottom:4px;display:flex;align-items:center;gap:6px}
+.slc-section-content{font-size:12px;color:var(--color-text);line-height:1.7}
+.slc-section-content a{color:var(--color-primary);font-weight:500}
+.slc-ai-tip{
+  background:var(--color-primary-xlight);border:1px solid var(--color-primary-light);
+  border-radius:var(--radius-sm);padding:10px 14px;
+  font-size:12px;color:var(--color-text);line-height:1.7;
+  margin:10px 0;
+}
+.slc-ai-tip strong{color:var(--color-primary)}
+.slc-actions{display:flex;gap:8px;margin-top:14px;padding-top:12px;border-top:1px solid var(--color-border-light)}
 </style>
 </head>
 <body>
@@ -291,6 +337,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
     <div class="nav-item" data-page="mail" onclick="switchPage('mail',this)" role="button" tabindex="0"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg><span>邮件助手</span></div>
     <div class="nav-item" data-page="grading" onclick="switchPage('grading',this)" role="button" tabindex="0"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg><span>客户分级</span></div>
     <div class="nav-item" data-page="pi" onclick="switchPage('pi',this)" role="button" tabindex="0"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg><span>PI工作台</span></div>
+    <a class="nav-item" href="messages.html"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg><span>消息中心</span><span class="msg-badge" id="sidebar-msg-badge" style="display:none;background:var(--color-danger);color:#fff;border-radius:10px;padding:1px 6px;font-size:10px;font-weight:700;margin-left:auto"></span></a>
     <div class="nav-item nav-item-back-home" onclick="window.location.href='panel.html'" role="button" tabindex="0"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg><span>返回门户</span></div>
   </div>
 </nav>
@@ -299,6 +346,19 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
     <section class="page active" id="page-signals">
     <div class="page-header">
       <div><h2>商机信号</h2><p>多信源公开行业资讯每日采集，AI 自动识别商机类型，高价值商机优先响应</p></div>
+      <div class="page-header-actions">
+        <button class="btn btn-primary" onclick="searchNewLeads()">🔍 搜索新线索</button>
+      </div>
+    </div>
+    <!-- Search Results Area -->
+    <div class="card" id="search-results-card" style="display:none">
+      <div class="card-header">
+        <h3>🔍 主动获客 · 搜索结果</h3>
+        <span class="card-sub" id="search-results-count"></span>
+      </div>
+      <div class="card-body">
+        <div id="search-results-list"></div>
+      </div>
     </div>
     <div class="card">
       <div class="card-header" style="flex-wrap:wrap;gap:8px 16px;justify-content:space-between;align-items:center">
@@ -2337,6 +2397,140 @@ function escHtml(s){
   var d=document.createElement('div');
   d.textContent=s;
   return d.innerHTML;
+}
+
+/* ===== Sidebar Message Badge ===== */
+(function(){
+  var token = localStorage.getItem('rhc_auth_token');
+  if (!token) return;
+  fetch('/api/messages/unread-count', { headers: { 'Authorization': 'Bearer ' + token } })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      var badge = document.getElementById('sidebar-msg-badge');
+      if (badge && d.count > 0) {
+        badge.textContent = d.count > 99 ? '99+' : d.count;
+        badge.style.display = '';
+      }
+    })
+    .catch(function(){});
+})();
+
+/* ===== Search New Leads ===== */
+function searchNewLeads() {
+  var token = localStorage.getItem('rhc_auth_token');
+  var card = document.getElementById('search-results-card');
+  var list = document.getElementById('search-results-list');
+  var countEl = document.getElementById('search-results-count');
+  
+  card.style.display = '';
+  list.innerHTML = '<div class="loading-state"><div class="spin"></div><div>正在搜索全网商机线索…</div></div>';
+  countEl.textContent = '';
+
+  fetch('/api/leads/search', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + token,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      target_markets: ['南美', '非洲', '欧洲', '东南亚'],
+      industry: 'veterinary',
+      limit: 10
+    })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    var leads = data.leads || data || [];
+    if (!leads.length) {
+      list.innerHTML = '<div class="empty-state" style="padding:40px 24px"><div class="es-icon">🔍</div><div class="es-title">暂未找到新线索</div><div class="es-desc">请调整搜索条件或稍后再试</div></div>';
+      return;
+    }
+    countEl.textContent = '共找到 ' + leads.length + ' 条线索';
+    var html = '';
+    for (var i = 0; i < leads.length; i++) {
+      var l = leads[i];
+      var gradeClass = (l.grade || '').toUpperCase() === 'A' ? 'grade-a' : ((l.grade || '').toUpperCase() === 'B' ? 'grade-b' : 'grade-c');
+      var gradeLabel = (l.grade || 'C') + '级';
+      
+      html += '<div class="search-lead-card" id="search-lead-' + (l.id || i) + '">'
+        + '<div class="slc-header">'
+        + '<span class="slc-grade ' + gradeClass + '">🟢 ' + gradeLabel + '</span>'
+        + '<span class="slc-region">' + (l.country || l.region || '') + '</span>'
+        + '<span class="slc-date">' + (l.date || '') + '</span>'
+        + '</div>'
+        + '<div class="slc-body">'
+        + '<div class="slc-company">' + escHtml(l.company || '') + '</div>'
+        + '<div class="slc-desc">' + escHtml(l.description || '') + '</div>';
+
+      // Products
+      if (l.products && l.products.length) {
+        html += '<div class="slc-section"><div class="slc-section-title">📦 需求产品</div><div class="slc-section-content">';
+        for (var p = 0; p < l.products.length; p++) {
+          html += '<div>' + escHtml(l.products[p].name || l.products[p]) + (l.products[p].recommend ? ' （推荐 ' + escHtml(l.products[p].recommend) + '）' : '') + '</div>';
+        }
+        html += '</div></div>';
+      }
+
+      // Contact
+      if (l.email || l.phone) {
+        html += '<div class="slc-section"><div class="slc-section-title">📧 联系方式</div><div class="slc-section-content">';
+        if (l.email) html += '<div>邮箱：' + escHtml(l.email) + '</div>';
+        if (l.phone) html += '<div>电话：' + escHtml(l.phone) + '</div>';
+        html += '</div></div>';
+      }
+
+      // Source
+      if (l.source) {
+        html += '<div class="slc-section"><div class="slc-section-title">🌐 来源</div><div class="slc-section-content">' + escHtml(l.source) + '</div></div>';
+      }
+
+      // AI suggestion
+      if (l.ai_suggestion) {
+        html += '<div class="slc-ai-tip"><strong>💡 AI建议：</strong>' + escHtml(l.ai_suggestion) + '</div>';
+      }
+
+      // Actions
+      html += '<div class="slc-actions">'
+        + '<button class="btn btn-primary btn-sm" onclick="claimSearchLead(\'' + (l.id || i) + '\')">加入跟进</button>'
+        + '<button class="btn btn-outline btn-sm" onclick="dismissSearchLead(\'' + (l.id || i) + '\')">暂不处理</button>'
+        + '</div>'
+        + '</div></div>';
+    }
+    list.innerHTML = html;
+  })
+  .catch(function() {
+    list.innerHTML = '<div class="empty-state" style="padding:40px 24px"><div class="es-icon">⚠️</div><div class="es-title">搜索失败</div><div class="es-desc">请检查网络连接后重试</div></div>';
+  });
+}
+
+function claimSearchLead(leadId) {
+  var token = localStorage.getItem('rhc_auth_token');
+  var card = document.getElementById('search-lead-' + leadId);
+  if (!card) return;
+
+  fetch('/api/leads/claim', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + token,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ lead_id: leadId })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    showToast('已加入跟进', 'success');
+    card.style.opacity = '0.5';
+    var actions = card.querySelector('.slc-actions');
+    if (actions) actions.innerHTML = '<span style="font-size:12px;color:var(--color-success);font-weight:600">✓ 已认领跟进</span>';
+  })
+  .catch(function() { showToast('认领失败，请重试', 'error'); });
+}
+
+function dismissSearchLead(leadId) {
+  var card = document.getElementById('search-lead-' + leadId);
+  if (!card) return;
+  card.style.display = 'none';
+  showToast('已跳过该线索');
 }
 
 </script>
