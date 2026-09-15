@@ -2754,6 +2754,7 @@ var myCustomersLoaded=false;
 /* ===== 公海池缓存 & 补搜轮询 ===== */
 var publicPoolCache=null;  // {items: [...], timestamp: Date}
 var publicPoolPollTimer=null;  // 补搜轮询定时器
+var enrichmentPollGraceUntil=0; // 手动搜索后的补搜观察宽限截止时间戳（ms）
 var PUBLIC_POOL_CACHE_TTL=5*60*1000; // 5分钟
 var myCustomersCache=null;  // {items: [...], timestamp: Date} 私海5分钟内存缓存（v2.1）
 var MY_CUSTOMERS_CACHE_TTL=5*60*1000;
@@ -3071,18 +3072,20 @@ function enrichLead(rid,btn){
 /* 渐进式补搜轮询 */
 function startEnrichmentPolling(){
   clearInterval(publicPoolPollTimer);
-  // 检查是否有线索还在补搜中
-  var hasPending=publicPoolLeads.some(function(l){
-    var s=l['补搜状态']||l.enrich_status||'';
-    return s==='未补搜'||s==='轻补搜中'||s==='深度补搜中'||s==='';
-  });
-  if(!hasPending)return;
+  // 仅当存在"真正在补搜中"的线索时才轮询；"未补搜"是静止状态（等用户手动补全/手动搜索），
+  // 不应触发每5秒全量重绘，否则公海池会无限频繁刷新。
+  // 手动搜索后设置 enrichmentPollGraceUntil：新线索刚写入、后台补搜状态可能还没翻出来，
+  // 宽限期内即使暂时没有"补搜中"也继续观察；平时进页面无宽限，无补搜立即不轮询。
+  var POLL_MAX_MS=120000; // 补搜轮询最多2分钟；到期静默停止，不再强制刷新重启
+  var IN_FLIGHT={'轻补搜中':1,'深度补搜中':1};
+  function statusOf(l){return l['补搜状态']||l.enrich_status||'';}
+  function anyRunning(){return publicPoolLeads.some(function(l){return !!IN_FLIGHT[statusOf(l)];});}
+  if(Date.now()>enrichmentPollGraceUntil && !anyRunning())return;
   var pollStartedAt=Date.now();
-  var POLL_MAX_MS=180000; // 单次轮询最多3分钟，防止个别线索卡死导致永久转圈/无限请求
-  publicPoolPollTimer=setInterval(function(){
+  function tick(){
     if(Date.now()-pollStartedAt>POLL_MAX_MS){
-      clearInterval(publicPoolPollTimer);
-      loadPublicPool(true); // 最后强制拉一次最新状态（后端会复位真正卡死的记录）
+      clearInterval(publicPoolPollTimer); // 到期静默停止，避免无限刷新；卡死状态由后端重启复位
+      enrichmentPollGraceUntil=0;
       return;
     }
     fetch('/api/leads/public',{headers:authHeaders(),cache:'no-store'})
@@ -3096,15 +3099,14 @@ function startEnrichmentPolling(){
         publicPoolLeads.sort(function(a,b){return (parseInt(b.score||b['综合评分']||0,10))-(parseInt(a.score||a['综合评分']||0,10))});
         publicPoolCache={items:publicPoolLeads.slice(),timestamp:Date.now()};
         renderPublicPool();
-        // 检查是否全部完成
-        var allDone=publicPoolLeads.every(function(l){
-          var s=l['补搜状态']||l.enrich_status||'';
-          return s==='已深度补全'||s==='已轻补'||s==='补搜失败';
-        });
-        if(allDone)clearInterval(publicPoolPollTimer);
+        // 有补搜在跑则继续；没有时，仅在手动搜索宽限窗口内继续观察，窗口结束即停
+        if(!anyRunning() && Date.now()>enrichmentPollGraceUntil){
+          clearInterval(publicPoolPollTimer);
+        }
       })
       .catch(function(){});
-  },5000);
+  }
+  publicPoolPollTimer=setInterval(tick,5000);
 }
 
 function claimLead(rid,btn){
@@ -3275,6 +3277,8 @@ function searchNewLeads() {
     list.innerHTML=html;
     // 搜索完成后强制刷新公海池（新线索已入飞书表）
     publicPoolCache=null;
+    // 手动搜索：给20秒宽限跟进后台补搜进度（新线索状态可能稍后才翻成"补搜中"）
+    enrichmentPollGraceUntil=Date.now()+20000;
     loadPublicPool(true);
   })
   .catch(function() {

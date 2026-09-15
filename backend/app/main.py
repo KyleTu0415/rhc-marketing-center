@@ -4850,10 +4850,16 @@ async def startup_scheduler():
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
         from apscheduler.triggers.cron import CronTrigger
         scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
-        scheduler.add_job(_scheduled_leads_search, CronTrigger(hour=9, minute=0), id="leads_search_9am")
-        scheduler.add_job(_scheduled_leads_search, CronTrigger(hour=15, minute=0), id="leads_search_3pm")
-        scheduler.start()
-        print("[scheduler] APScheduler 已启动，定时任务: 每天 09:00 / 15:00 北京时间")
+        # 主动获客改为「人工点击才搜索」：默认不挂定时任务。
+        # 需要恢复每日 09:00/15:00 自动搜索时，在环境变量设置 ENABLE_SCHEDULED_SEARCH=true。
+        if os.environ.get("ENABLE_SCHEDULED_SEARCH", "").strip().lower() in ("1", "true", "yes", "on"):
+            scheduler.add_job(_scheduled_leads_search, CronTrigger(hour=9, minute=0), id="leads_search_9am")
+            scheduler.add_job(_scheduled_leads_search, CronTrigger(hour=15, minute=0), id="leads_search_3pm")
+            scheduler.start()
+            print("[scheduler] APScheduler 已启动，定时主动搜索: 每天 09:00 / 15:00 北京时间")
+        else:
+            scheduler.start()
+            print("[scheduler] 定时主动搜索已关闭（仅人工点击「搜索新线索」触发）；如需恢复设 ENABLE_SCHEDULED_SEARCH=true")
     except Exception as e:
         print(f"[scheduler] APScheduler 启动失败: {e}")
     # 启动后静默校正"可达性闸门"上线前的历史虚高评分（幂等，只跑一次）
