@@ -10,8 +10,8 @@ class Settings:
     COZE_ANIMAL_WORKFLOW_ID: str = os.getenv("COZE_ANIMAL_WORKFLOW_ID", "7682438125654425650")
     # 线索AI打分工作流（Lead_Score）
     COZE_LEAD_SCORE_WORKFLOW_ID: str = os.getenv("COZE_LEAD_SCORE_WORKFLOW_ID", "7685777171490930688")
-    # 开发信AI生成工作流（待创建，暂为空 → 用本地模板兜底）
-    COZE_EMAIL_WORKFLOW_ID: str = os.getenv("COZE_EMAIL_WORKFLOW_ID", "")
+    # 开发信AI生成工作流（Lead_Email）
+    COZE_EMAIL_WORKFLOW_ID: str = os.getenv("COZE_EMAIL_WORKFLOW_ID", "7685799159194239002")
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     OPENAI_BASE_URL: str = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
     OPENAI_TEXT_MODEL: str = os.getenv("OPENAI_TEXT_MODEL", "deepseek-chat")

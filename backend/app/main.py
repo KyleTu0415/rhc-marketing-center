@@ -85,7 +85,7 @@ except ImportError:
         coze_pat: str = os.getenv("COZE_PAT", "")
         coze_workflow_id: str = os.getenv("COZE_WORKFLOW_ID", "")
         coze_lead_score_workflow_id: str = os.getenv("COZE_LEAD_SCORE_WORKFLOW_ID", "7685777171490930688")
-        coze_email_workflow_id: str = os.getenv("COZE_EMAIL_WORKFLOW_ID", "")
+        coze_email_workflow_id: str = os.getenv("COZE_EMAIL_WORKFLOW_ID", "7685799159194239002")
         openai_base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
         openai_text_model: str = os.getenv("OPENAI_TEXT_MODEL", "deepseek-chat")
         smtp_host: str = os.getenv("SMTP_HOST", "smtp.exmail.qq.com")
@@ -3756,6 +3756,35 @@ async def send_email(to_addrs, subject, body, cc=None,
 # ------------------------------------------------------------
 # 开发信生成：Coze 工作流优先，本地高质量英文模板兜底
 # ------------------------------------------------------------
+def _clean_company_name(raw: str) -> str:
+    """清洗脏公司名：搜索词式短语（含多关键词/冒号/import等）不当公司名用，返回空串。
+    真实公司名通常是 1-4 个词的专名，常见法律后缀 Ltd/Inc/LLC/GmbH/S.A./Corp 等。"""
+    if not raw:
+        return ""
+    name = raw.strip()
+    low = name.lower()
+    # 明显是搜索词/句子的特征
+    bad_markers = (":", "：", " import ", " import,", " company:", " companies ",
+                   " supplier", " manufacturers ", " for sale", " price", " buy ",
+                   " wholesale", " distributor of", " looking for", " wanted")
+    if any(m in low for m in bad_markers):
+        return ""
+    # 中文整句（含多个中文且无法律后缀）多半是搜索词
+    legal_suffix = ("ltd", "inc", "llc", "gmbh", "corp", "co.", "company", "s.a",
+                    "s.a.", "sa ", "limited", "co.,", "group", "holdings", "importadora",
+                    "comercio", "medical", "vet", "hospital", "clinic", "laboratorio",
+                    "laboratories", "health", "healthcare", "animal", "pet", "pharm")
+    has_cjk = bool(re.search(r"[\u4e00-\u9fff]", name))
+    cjk_count = len(re.findall(r"[\u4e00-\u9fff]", name))
+    if has_cjk and cjk_count >= 4 and not any(s in low for s in legal_suffix):
+        return ""
+    # 词数过多（>6）且无法律后缀，视为描述性短语
+    words = re.findall(r"[A-Za-z0-9\.]+", name)
+    if len(words) > 6 and not any(s in low for s in legal_suffix):
+        return ""
+    return name[:80]
+
+
 def _build_local_cold_email(info: dict):
     """本地兜底：生成地道 B2B 英文冷邮件，返回 (subject, body)。
     结构：自我介绍（RHC=中国兽用医疗器械制造商）+ 国家/行业个性化切入
@@ -3772,7 +3801,8 @@ def _build_local_cold_email(info: dict):
     is_concise = tone in ("简洁", "concise", "Concise")
 
     first_name = decision_maker.split()[0] if decision_maker else ""
-    greeting = f"Hi {first_name}," if first_name else f"Hello {company} team,"
+    greeting = (f"Hi {first_name}," if first_name
+                else (f"Hello {company} team," if company else "Hello,"))
 
     # 一句话自我介绍
     if is_friendly:
@@ -3818,7 +3848,8 @@ def _build_local_cold_email(info: dict):
                "to your market?")
 
     if is_concise:
-        subject = f"RHC {product} – factory-direct supply for {company}"
+        subject = (f"RHC {product} supply – {company}"
+                   if company else f"RHC {product} supply")
         body = (
             f"{greeting}\n\n"
             f"{intro}\n\n"
@@ -3829,9 +3860,11 @@ def _build_local_cold_email(info: dict):
         return subject, body
 
     if is_friendly:
-        subject = f"A quick note on veterinary equipment supply for {company}"
+        subject = (f"A quick note on veterinary equipment supply for {company}"
+                   if company else "A quick note on veterinary equipment supply")
     else:
-        subject = f"Factory-direct veterinary equipment supply for {company}"
+        subject = (f"Veterinary equipment supply for {company}"
+                   if company else "Veterinary anesthesia & monitoring equipment supply")
     body = (
         f"{greeting}\n\n"
         f"{intro}\n\n"
@@ -3895,7 +3928,7 @@ async def api_emails_generate(req: EmailGenerateRequest, request: Request):
     if not user_info:
         return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
     info = {
-        "company_name": (req.company_name or "").strip(),
+        "company_name": _clean_company_name((req.company_name or "").strip()),
         "country": (req.country or "").strip(),
         "product": (req.product or "").strip(),
         "industry": (req.industry or "").strip(),
@@ -3916,16 +3949,14 @@ async def api_emails_generate(req: EmailGenerateRequest, request: Request):
         wf_id = _settings_val("coze_email_workflow_id", "")
         pat = (_get_sales_coze_pat()
                or getattr(settings, "COZE_PAT", "") or getattr(settings, "coze_pat", "") or "")
-        if wf_id and pat and info["company_name"]:
+        if wf_id and pat and (info["company_name"] or info["product"] or info["country"]):
             try:
                 parameters = {
-                    "record_id": (req.record_id or "").strip(),
                     "company_name": info["company_name"],
                     "country": info["country"],
                     "product": info["product"],
                     "industry": info["industry"],
                     "website": info["website"],
-                    "email_pattern": info["email_pattern"],
                     "decision_maker": info["decision_maker"],
                     "recipient_email": info["recipient_email"],
                     "tone": info["tone"],
