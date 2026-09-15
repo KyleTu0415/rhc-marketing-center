@@ -4905,6 +4905,97 @@ threading.Thread(target=_warmup_messages_table, daemon=True).start()
 # 启动时后台预热飞书「开发信记录」表（自动建表），不阻塞服务启动
 threading.Thread(target=_warmup_emails_table, daemon=True).start()
 
+
+# ===================== 一次性假线索清理（带密钥，用完即删） =====================
+_CLEANUP_DEBUG_KEY = os.environ.get("RHC_CLEANUP_KEY", "rhc-clean-2026-0916")
+
+def _classify_fake_lead(ld: dict):
+    """保守判定假线索。仅当『未认领』且命中明确脏特征时返回原因串，否则返回 None。"""
+    try:
+        claim_status = (ld.get("认领状态") or "").strip()
+        if claim_status == "已认领":
+            return None  # 已认领一律不碰
+        company = (ld.get("公司机构") or "").strip()
+        title = (ld.get("标题") or "").strip()
+        url = (ld.get("原文链接") or ld.get("官网") or "").strip()
+        blob = f"{company} {title}".lower()
+        low_co = company.lower()
+        # 1) 电商货架/商品详情页 URL
+        if _is_seller_or_section_url(url):
+            return f"电商商品/货架页: {url}"
+        # 2) 纯产品短语，且标题/公司名没有任何品牌实词
+        if company and _is_product_phrase(company):
+            return f"纯产品名非公司: {company[:60]}"
+        # 3) 已知脏标题模式（历史脏数据）
+        dirty_marks = ("trade data", "export import trade", "brazil company:",
+                       "global veterinary anesthesia machine export")
+        if any(mk in blob for mk in dirty_marks):
+            return f"脏标题模式: {title[:60]}"
+        # 4) 产品名被截断（标题以 with 结尾 / 产品词堆砌超长且无法律后缀）
+        if low_co.rstrip().endswith(" with") and _is_product_phrase(low_co.replace("with", "")):
+            return f"产品名截断: {company[:60]}"
+        return None
+    except Exception as e:
+        print(f"[cleanup] 判定异常: {e}")
+        return None
+
+
+@app.post("/api/admin/cleanup-fake-leads")
+async def api_admin_cleanup_fake_leads(request: Request):
+    """一次性假线索清理。body: {key, mode: scan|delete, ids?:[]}。
+    scan=只列出服务端复核命中的候选；delete=仅删除 ids 且再次复核通过者，返回被删完整记录。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if body.get("key") != _CLEANUP_DEBUG_KEY:
+        return JSONResponse({"ok": False, "message": "密钥错误"}, status_code=403)
+    mode = body.get("mode", "scan")
+    force_ids = set(body.get("ids") or [])
+    leads = _fetch_leads(force_refresh=True)
+    candidates = []
+    for ld in leads:
+        rid = ld.get("record_id", "")
+        reason = _classify_fake_lead(ld)
+        if reason or (force_ids and rid in force_ids):
+            candidates.append({
+                "record_id": rid,
+                "company": ld.get("公司机构", ""),
+                "title": ld.get("标题", ""),
+                "url": ld.get("原文链接", "") or ld.get("官网", ""),
+                "claim_status": ld.get("认领状态", ""),
+                "score": ld.get("综合评分", ""),
+                "enrich": ld.get("补搜状态", ""),
+                "reason": reason or "强制指定(待人工确认)",
+            })
+    if mode == "scan":
+        return {"ok": True, "mode": "scan", "count": len(candidates), "candidates": candidates,
+                "total_leads": len(leads)}
+    if mode != "delete":
+        return JSONResponse({"ok": False, "message": "mode 必须为 scan 或 delete"}, status_code=400)
+    # 删除：只删 force_ids 内、且服务端复核确认为假（或未认领）的记录
+    tid = _ensure_leads_table()
+    deleted, skipped, backup = [], [], []
+    for c in candidates:
+        rid = c["record_id"]
+        if force_ids and rid not in force_ids:
+            continue
+        # 再保险：强制指定的也必须是未认领才删
+        if c["claim_status"] == "已认领":
+            skipped.append({"record_id": rid, "company": c["company"], "reason": "已认领，保护不删"})
+            continue
+        try:
+            _feishu_api("DELETE", f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records/{rid}")
+            backup.append(c)
+            deleted.append(rid)
+        except Exception as e:
+            skipped.append({"record_id": rid, "company": c["company"], "reason": f"删除失败: {e}"})
+    _invalidate_leads_cache()
+    return {"ok": True, "mode": "delete", "deleted_count": len(deleted), "deleted_ids": deleted,
+            "skipped": skipped, "backup": backup}
+# ===================== 一次性清理结束 =====================
+
+
 # Serve frontend - try multiple possible locations
 _candidate_dirs = [
     os.path.join(os.path.dirname(__file__), "frontend"),                              # Railway root=backend/: /app/frontend
