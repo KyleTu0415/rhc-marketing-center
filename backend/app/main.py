@@ -691,6 +691,13 @@ LEADS_FIELD_MAP = {
     "邮箱来源": "邮箱来源",
     "认领状态": "认领状态",
     "综合评分": "综合评分",
+    "官网": "官网",
+    "行业": "行业",
+    "邮箱格式": "邮箱格式",
+    "决策人": "决策人",
+    "LinkedIn": "LinkedIn",
+    "进口记录": "进口记录",
+    "补搜状态": "补搜状态",
 }
 LEAD_ACTIVE_STATUS = ("跟进中", "已转客户")
 LEAD_STATUS_OPTIONS = ("跟进中", "已转客户", "已释放")
@@ -735,6 +742,18 @@ def _ensure_leads_table():
         {"field_name": "认领状态", "type": 3,    # 单选：未认领/已认领
          "property": {"options": [{"name": "未认领"}, {"name": "已认领"}]}},
         {"field_name": "综合评分", "type": 2},   # 数字（0-100）
+        {"field_name": "官网", "type": 1},       # 文本
+        {"field_name": "行业", "type": 1},       # 文本
+        {"field_name": "邮箱格式", "type": 1},   # 文本
+        {"field_name": "决策人", "type": 1},     # 文本
+        {"field_name": "LinkedIn", "type": 1},   # 文本
+        {"field_name": "进口记录", "type": 1},   # 文本
+        {"field_name": "补搜状态", "type": 3,    # 单选
+         "property": {"options": [
+             {"name": "未补搜"}, {"name": "轻补搜中"},
+             {"name": "已轻补"}, {"name": "深度补搜中"},
+             {"name": "已深度补全"}, {"name": "补搜失败"}
+         ]}},
     ]
     resp = _feishu_api("POST", f"/bitable/v1/apps/{FEISHU_ATK}/tables",
                        {"table": {"name": LEADS_TABLE_NAME,
@@ -769,6 +788,18 @@ LEADS_FIELDS_SCHEMA = [
     {"field_name": "认领状态", "type": 3,
      "property": {"options": [{"name": "未认领"}, {"name": "已认领"}]}},
     {"field_name": "综合评分", "type": 2},
+    {"field_name": "官网", "type": 1},
+    {"field_name": "行业", "type": 1},
+    {"field_name": "邮箱格式", "type": 1},
+    {"field_name": "决策人", "type": 1},
+    {"field_name": "LinkedIn", "type": 1},
+    {"field_name": "进口记录", "type": 1},
+    {"field_name": "补搜状态", "type": 3,
+     "property": {"options": [
+         {"name": "未补搜"}, {"name": "轻补搜中"},
+         {"name": "已轻补"}, {"name": "深度补搜中"},
+         {"name": "已深度补全"}, {"name": "补搜失败"}
+     ]}},
 ]
 
 
@@ -2605,9 +2636,295 @@ def _rate_lead_quality(info: dict) -> str:
 
 async def call_coze_scoring_workflow(lead_info: dict) -> int:
     """调用Coze工作流对线索进行多维度AI打分，返回0-100分
-    暂时用A/B/C规则兜底，待Coze工作流就绪后切换"""
+    输入包含轻补搜后的丰富信息（官网/行业/邮箱等），打分更准确。
+    暂时用A/B/C规则+补搜信息兜底，待Coze工作流就绪后切换"""
     grade = lead_info.get("confidence", "C")
-    return {"A": 90, "B": 60, "C": 30}.get(grade, 30)
+    base_score = {"A": 90, "B": 60, "C": 30}.get(grade, 30)
+    # 轻补搜后信息加分：有官网+5，有行业+3，有邮箱格式+5
+    bonus = 0
+    if lead_info.get("website") and not lead_info["website"].startswith("https://html.duckduckgo.com"):
+        bonus += 5
+    if lead_info.get("industry"):
+        bonus += 3
+    if lead_info.get("email_pattern"):
+        bonus += 5
+    return min(100, base_score + bonus)
+
+
+# ============================================================
+# 异步补搜引擎（轻补搜 → 重评分 → Top5深度补搜）
+# 基础搜索立即返回 → 后台线程跑补搜 → 前端轮询看到渐进更新
+# ============================================================
+_ENRICH_CONCURRENCY = 3      # 最大并发补搜数，避免IP被封
+_ENRICH_DELAY = 0.5          # 每条补搜间隔（秒）
+_ENRICH_TIMEOUT = 10         # 单条补搜超时（秒）
+
+
+def _update_leads_record(record_id: str, fields: dict):
+    """更新飞书线索表单条记录的指定字段"""
+    if not record_id:
+        return
+    tid = _ensure_leads_table()
+    try:
+        _feishu_api(
+            "PUT",
+            f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records/{record_id}",
+            {"fields": fields})
+    except Exception as e:
+        print(f"[enrich] 更新线索记录失败 ({record_id}): {e}")
+
+
+def _search_ddg_single(query: str, timeout: int = 6) -> list:
+    """单条DuckDuckGo搜索，返回 [{title, url, snippet}]（复用现有模式）"""
+    import urllib.parse as _up
+    import urllib.request as _ur
+    import urllib.error as _ue
+    q = _up.urlencode({"q": query})
+    url = "https://html.duckduckgo.com/html/?" + q
+    req = _ur.Request(url, headers={
+        "User-Agent": _FIND_UA,
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9",
+    })
+    results = []
+    try:
+        with _ur.urlopen(req, timeout=timeout) as r:
+            html_text = r.read(1_000_000).decode("utf-8", "ignore")
+        for m in re.finditer(
+                r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+                html_text, re.I):
+            href = _ddg_real_url(m.group(1))
+            title = re.sub(r'<[^>]+>', '', m.group(2)).strip()
+            if not href or not title:
+                continue
+            snippet = ""
+            snip_match = re.search(
+                re.escape(href[:30]) + r'.*?<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
+                html_text, re.I | re.S)
+            if snip_match:
+                snippet = re.sub(r'<[^>]+>', '', snip_match.group(1)).strip()[:300]
+            results.append({"title": title, "url": href, "snippet": snippet})
+            if len(results) >= 5:
+                break
+    except Exception:
+        pass
+    return results
+
+
+async def light_enrich_lead(company_name: str, country: str) -> dict:
+    """轻补搜：官网、行业、邮箱格式
+    用DuckDuckGo搜索，提取官网URL、行业关键词、邮箱格式
+    单条总耗时控制在3-5秒"""
+    result = {"website": "", "industry": "", "email_pattern": ""}
+    try:
+        # 搜索官网
+        queries = [
+            f'"{company_name}" {country} official website',
+            f'"{company_name}" {country} contact email',
+        ]
+        all_text = ""
+        for q in queries:
+            sr = await asyncio.get_event_loop().run_in_executor(
+                None, _search_ddg_single, q, _ENRICH_TIMEOUT)
+            for item in sr:
+                u = item.get("url", "")
+                # 提取官网：排除搜索引擎/社交媒体/通用目录站
+                if u and company_name.lower().split()[0] in u.lower():
+                    if not any(skip in u for skip in [
+                            "duckduckgo.com", "wikipedia.org", "facebook.com",
+                            "linkedin.com", "twitter.com", "youtube.com"]):
+                        result["website"] = u
+                        break
+                all_text += " " + item.get("title", "") + " " + item.get("snippet", "")
+            await asyncio.sleep(_ENRICH_DELAY)
+
+        # 提取行业关键词
+        industry_keywords = {
+            "veterinary": "兽医/动物医疗", "animal hospital": "动物医院",
+            "clinic": "诊所", "pharmaceutical": "制药", "medical device": "医疗器械",
+            "distributor": "经销商", "importer": "进口商", "wholesale": "批发",
+            "agriculture": "农业", "livestock": "畜牧业", "pet": "宠物",
+        }
+        text_lower = all_text.lower()
+        found_industries = [cn for kw, cn in industry_keywords.items() if kw in text_lower]
+        if found_industries:
+            result["industry"] = "/".join(found_industries[:3])
+
+        # 提取邮箱格式
+        email_match = re.search(
+            r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', all_text)
+        if email_match:
+            email = email_match.group(0)
+            # 转换为通用格式（如 info@company.com）
+            domain = email.split("@")[-1]
+            prefix = email.split("@")[0]
+            if prefix in ["info", "contact", "sales", "office", "admin"]:
+                result["email_pattern"] = f"{prefix}@{domain}"
+            else:
+                result["email_pattern"] = f"info@{domain}"
+
+    except Exception as e:
+        print(f"[enrich] 轻补搜失败 ({company_name}): {e}")
+    return result
+
+
+async def deep_enrich_lead(company_name: str, country: str, website: str = "") -> dict:
+    """深度补搜：决策人、LinkedIn、进口记录
+    组合多维度搜索，提取关键商务信息"""
+    result = {"decision_maker": "", "linkedin": "", "import_record": ""}
+    try:
+        queries = [
+            f'"{company_name}" {country} CEO director manager contact',
+            f'"{company_name}" LinkedIn',
+            f'"{company_name}" {country} import veterinary medical equipment',
+        ]
+        all_text = ""
+        for q in queries:
+            sr = await asyncio.get_event_loop().run_in_executor(
+                None, _search_ddg_single, q, _ENRICH_TIMEOUT)
+            for item in sr:
+                all_text += " " + item.get("title", "") + " " + item.get("snippet", "")
+                # 提取LinkedIn链接
+                u = item.get("url", "")
+                if "linkedin.com" in u and company_name.lower().split()[0] in u.lower():
+                    result["linkedin"] = u
+            await asyncio.sleep(_ENRICH_DELAY)
+
+        # 提取决策人姓名（从标题/摘要中找常见模式）
+        dm_patterns = [
+            r'(?:CEO|Director|Manager|Founder|Owner|President|VP)\s*:?\s*([A-Z][a-z]+\s+[A-Z][a-z]+)',
+            r'([A-Z][a-z]+\s+[A-Z][a-z]+)\s*(?:CEO|Director|Manager|Founder)',
+        ]
+        for pat in dm_patterns:
+            m = re.search(pat, all_text)
+            if m:
+                result["decision_maker"] = m.group(1).strip()
+                break
+
+        # 提取进口记录线索
+        import_keywords = ["import", "distributor", "dealer", "purchase", "procurement"]
+        if any(kw in all_text.lower() for kw in import_keywords):
+            # 提取包含进口信息的片段
+            for sentence in re.split(r'[.!?]', all_text):
+                if any(kw in sentence.lower() for kw in import_keywords):
+                    clean = re.sub(r'<[^>]+>', '', sentence).strip()[:200]
+                    if len(clean) > 20:
+                        result["import_record"] = clean
+                        break
+
+    except Exception as e:
+        print(f"[enrich] 深度补搜失败 ({company_name}): {e}")
+    return result
+
+
+async def _enrich_all_leads_async(new_leads: list):
+    """后台线程：对全量线索跑轻补搜 → 重评分 → Top5深度补搜
+    1. 每条线索调 light_enrich_lead → 更新飞书表（补搜状态=已轻补）
+    2. 轻补搜完成后，对所有线索重新调 call_coze_scoring_workflow
+    3. 按新评分排序，取Top5调 deep_enrich_lead（补搜状态=已深度补全）
+    4. 全过程中每条更新都写回飞书表，前端轮询能看到进度"""
+    from concurrent.futures import ThreadPoolExecutor
+    print(f"[enrich] 后台补搜启动，共 {len(new_leads)} 条线索")
+
+    # Phase 1: 全量轻补搜
+    for i, lead in enumerate(new_leads):
+        record_id = lead.get("_record_id", "")
+        if not record_id:
+            continue
+        # 标记轻补搜中
+        _update_leads_record(record_id, {"补搜状态": "轻补搜中"})
+        try:
+            enriched = await asyncio.wait_for(
+                light_enrich_lead(lead.get("company_name", ""), lead.get("country", "")),
+                timeout=_ENRICH_TIMEOUT * 2)
+            # 更新飞书表
+            update_fields = {
+                "补搜状态": "已轻补",
+            }
+            if enriched.get("website"):
+                update_fields["官网"] = enriched["website"]
+                lead["website"] = enriched["website"]
+            if enriched.get("industry"):
+                update_fields["行业"] = enriched["industry"]
+                lead["industry"] = enriched["industry"]
+            if enriched.get("email_pattern"):
+                update_fields["邮箱格式"] = enriched["email_pattern"]
+                lead["email_pattern"] = enriched["email_pattern"]
+            _update_leads_record(record_id, update_fields)
+            lead.update(enriched)
+        except asyncio.TimeoutError:
+            print(f"[enrich] 轻补搜超时: {lead.get('company_name')}")
+            _update_leads_record(record_id, {"补搜状态": "补搜失败"})
+        except Exception as e:
+            print(f"[enrich] 轻补搜异常 ({lead.get('company_name')}): {e}")
+            _update_leads_record(record_id, {"补搜状态": "补搜失败"})
+        # 控制频率
+        await asyncio.sleep(_ENRICH_DELAY)
+
+    _invalidate_leads_cache()
+    print(f"[enrich] 轻补搜完成，开始重评分")
+
+    # Phase 2: 重新评分（用轻补搜后的丰富信息）
+    for lead in new_leads:
+        record_id = lead.get("_record_id", "")
+        if not record_id:
+            continue
+        try:
+            new_score = await call_coze_scoring_workflow(lead)
+            lead["score"] = new_score
+            _update_leads_record(record_id, {"综合评分": new_score})
+        except Exception as e:
+            print(f"[enrich] 重评分失败 ({lead.get('company_name')}): {e}")
+    _invalidate_leads_cache()
+
+    # Phase 3: Top5深度补搜
+    sorted_leads = sorted(new_leads, key=lambda x: x.get("score", 0), reverse=True)
+    top5 = sorted_leads[:5]
+    print(f"[enrich] Top5深度补搜: {[l.get('company_name','') for l in top5]}")
+    for lead in top5:
+        record_id = lead.get("_record_id", "")
+        if not record_id:
+            continue
+        _update_leads_record(record_id, {"补搜状态": "深度补搜中"})
+        try:
+            deep = await asyncio.wait_for(
+                deep_enrich_lead(
+                    lead.get("company_name", ""),
+                    lead.get("country", ""),
+                    lead.get("website", "")),
+                timeout=_ENRICH_TIMEOUT * 2)
+            update_fields = {"补搜状态": "已深度补全"}
+            if deep.get("decision_maker"):
+                update_fields["决策人"] = deep["decision_maker"]
+                lead["decision_maker"] = deep["decision_maker"]
+            if deep.get("linkedin"):
+                update_fields["LinkedIn"] = deep["linkedin"]
+                lead["linkedin"] = deep["linkedin"]
+            if deep.get("import_record"):
+                update_fields["进口记录"] = deep["import_record"]
+                lead["import_record"] = deep["import_record"]
+            _update_leads_record(record_id, update_fields)
+        except asyncio.TimeoutError:
+            _update_leads_record(record_id, {"补搜状态": "补搜失败"})
+        except Exception as e:
+            print(f"[enrich] 深度补搜异常 ({lead.get('company_name')}): {e}")
+            _update_leads_record(record_id, {"补搜状态": "补搜失败"})
+        await asyncio.sleep(_ENRICH_DELAY)
+
+    _invalidate_leads_cache()
+    print(f"[enrich] 全量补搜流程完成")
+
+
+def _start_enrichment_background(leads_with_ids: list):
+    """启动后台补搜线程（异步转同步桥接）"""
+    def _run():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(_enrich_all_leads_async(leads_with_ids))
+        finally:
+            loop.close()
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def _recommend_product(demand: str) -> str:
@@ -2748,7 +3065,7 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
                 "cached": True}
 
     try:
-        # 1) 执行搜索
+        # 1) 执行基础搜索
         raw_leads = _run_lead_search(max_results=max_results)
 
         # 2) 与已有线索去重
@@ -2758,53 +3075,61 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
             existing_leads = []
         new_leads = _dedup_with_existing_leads(raw_leads, existing_leads)
 
-        # 3) 对每条新线索打分并写入飞书线索表（认领状态=未认领，综合评分=分数）
-        async def _score_and_write_leads():
-            tid = _ensure_leads_table()
-            now_iso = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
-            for lead in new_leads:
-                score = await call_coze_scoring_workflow(lead)
-                lead["score"] = score
-                grade = lead.get("confidence", "C")
-                fields = {
-                    "线索标题": f"{lead.get('company_name', '')}（{lead.get('country', '')}）",
-                    "商机类型": "渠道动态",
-                    "公司/机构": lead.get("company_name", ""),
-                    "摘要": (lead.get("ai_suggestion", "") or "")[:2000],
-                    "来源": lead.get("source", "DuckDuckGo搜索")[:200],
-                    "原文链接": lead.get("website", ""),
-                    "地区": f"{lead.get('region', '')} - {lead.get('country', '')}",
-                    "发布日期": now_iso[:10],
-                    "认领状态": "未认领",
-                    "认领人": "",
-                    "认领时间": "",
-                    "状态": "跟进中",
-                    "联系邮箱": "",
-                    "跟进备注": "",
-                    "邮箱来源": "",
-                    "综合评分": score,
-                }
-                try:
-                    _feishu_api(
-                        "POST",
-                        f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records",
-                        {"fields": fields})
-                except Exception as we:
-                    print(f"[search] 写入线索表失败: {we}")
-            _invalidate_leads_cache()
-        await _score_and_write_leads()
+        # 3) 写入飞书线索表（补搜状态=未补搜），记录record_id供后台补搜使用
+        tid = _ensure_leads_table()
+        now_iso = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+        leads_with_record_ids = []
+        for lead in new_leads:
+            score = await call_coze_scoring_workflow(lead)
+            lead["score"] = score
+            fields = {
+                "线索标题": f"{lead.get('company_name', '')}（{lead.get('country', '')}）",
+                "商机类型": "渠道动态",
+                "公司/机构": lead.get("company_name", ""),
+                "摘要": (lead.get("ai_suggestion", "") or "")[:2000],
+                "来源": lead.get("source", "DuckDuckGo搜索")[:200],
+                "原文链接": lead.get("website", ""),
+                "地区": f"{lead.get('region', '')} - {lead.get('country', '')}",
+                "发布日期": now_iso[:10],
+                "认领状态": "未认领",
+                "认领人": "",
+                "认领时间": "",
+                "状态": "跟进中",
+                "联系邮箱": "",
+                "跟进备注": "",
+                "邮箱来源": "",
+                "综合评分": score,
+                "补搜状态": "未补搜",
+                "官网": "",
+                "行业": "",
+                "邮箱格式": "",
+                "决策人": "",
+                "LinkedIn": "",
+                "进口记录": "",
+            }
+            try:
+                resp = _feishu_api(
+                    "POST",
+                    f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records",
+                    {"fields": fields})
+                record_id = resp.get("data", {}).get("record", {}).get("record_id", "")
+                lead["_record_id"] = record_id
+                leads_with_record_ids.append(lead)
+            except Exception as we:
+                print(f"[search] 写入线索表失败: {we}")
+        _invalidate_leads_cache()
 
-        # 4) 缓存结果
-        _search_results_cache["data"] = new_leads
-        _search_results_cache["ts"] = time.time()
+        # 4) 启动后台补搜线程（轻补搜→重评分→Top5深度补搜）
+        if leads_with_record_ids:
+            _start_enrichment_background(leads_with_record_ids)
 
         # 5) 为每条新线索自动创建消息通知（后台线程，不阻塞返回）
         if new_leads:
             def _create_messages():
                 try:
                     msg_tid = _ensure_messages_table()
-                    now_iso = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
-                    for lead in new_leads[:10]:  # 最多创建10条消息，避免写入过多
+                    now_iso2 = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+                    for lead in new_leads[:10]:
                         grade = lead.get("confidence", "C")
                         grade_emoji = "🔴" if grade == "A" else ("🟡" if grade == "B" else "⚪")
                         title = f"{grade_emoji} 新商机线索: {lead['company_name']}（{lead['country']}）"
@@ -2824,7 +3149,7 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
                             "接收人": "全部销售",
                             "已读状态": "未读",
                             "关联线索ID": "",
-                            "创建时间": now_iso,
+                            "创建时间": now_iso2,
                         }
                         try:
                             _feishu_api(
@@ -2837,16 +3162,22 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
                     print(f"[messages] 搜索后自动推送消息失败: {e}")
             threading.Thread(target=_create_messages, daemon=True).start()
 
+        # 6) 缓存结果
+        _search_results_cache["data"] = new_leads
+        _search_results_cache["ts"] = time.time()
+
         # 统计
         a_count = sum(1 for l in new_leads if l.get("confidence") == "A")
         b_count = sum(1 for l in new_leads if l.get("confidence") == "B")
         c_count = sum(1 for l in new_leads if l.get("confidence") == "C")
 
+        # 立即返回基础结果，后台补搜异步进行中
         return {
             "ok": True,
             "items": new_leads,
             "total": len(new_leads),
             "cached": False,
+            "enrichment": "started" if leads_with_record_ids else "none",
             "stats": {
                 "total_found": len(raw_leads),
                 "new_after_dedup": len(new_leads),
@@ -3210,8 +3541,69 @@ async def api_leads_claim_by_record(record_id: str, req: ClaimByRecordRequest, r
         return JSONResponse({"ok": False, "message": f"认领失败：{e}"}, status_code=502)
 
 
+class EnrichLeadRequest(BaseModel):
+    depth: str = "light"  # "light" 或 "deep"
+
+
+@app.post("/api/leads/{record_id}/enrich")
+async def api_leads_enrich(record_id: str, req: Optional[EnrichLeadRequest] = None, request: Request = None):
+    """手动触发单条线索补全信息。depth: light=轻补搜, deep=深度补搜。需JWT认证。"""
+    token = _get_token_from_request(request)
+    if not token or not _verify_token(token):
+        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    depth = "light"
+    if req:
+        depth = req.depth if req.depth in ("light", "deep") else "light"
+    try:
+        tid = _ensure_leads_table()
+        # 读取当前线索信息
+        resp = _feishu_api("GET", f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records/{record_id}")
+        rec = resp.get("data", {}).get("record", {})
+        fields = rec.get("fields", {})
+        company_name = _tv(fields.get("公司/机构"))
+        country = _tv(fields.get("地区", "")).split(" - ")[-1] if _tv(fields.get("地区")) else ""
+        website = _tv(fields.get("官网")) or _tv(fields.get("原文链接"))
+        if not company_name:
+            return JSONResponse({"ok": False, "message": "线索不存在或缺少公司名称"}, status_code=400)
+
+        if depth == "light":
+            _update_leads_record(record_id, {"补搜状态": "轻补搜中"})
+            enriched = await light_enrich_lead(company_name, country)
+            update_fields = {"补搜状态": "已轻补"}
+            if enriched.get("website"):
+                update_fields["官网"] = enriched["website"]
+            if enriched.get("industry"):
+                update_fields["行业"] = enriched["industry"]
+            if enriched.get("email_pattern"):
+                update_fields["邮箱格式"] = enriched["email_pattern"]
+            # 重评分
+            lead_info = {**{k: _tv(v) for k, v in fields.items()}, **enriched}
+            new_score = await call_coze_scoring_workflow(lead_info)
+            update_fields["综合评分"] = new_score
+            _update_leads_record(record_id, update_fields)
+            _invalidate_leads_cache()
+            return {"ok": True, "message": "轻补搜完成", "data": enriched, "new_score": new_score}
+        else:
+            _update_leads_record(record_id, {"补搜状态": "深度补搜中"})
+            deep = await deep_enrich_lead(company_name, country, website)
+            update_fields = {"补搜状态": "已深度补全"}
+            if deep.get("decision_maker"):
+                update_fields["决策人"] = deep["decision_maker"]
+            if deep.get("linkedin"):
+                update_fields["LinkedIn"] = deep["linkedin"]
+            if deep.get("import_record"):
+                update_fields["进口记录"] = deep["import_record"]
+            _update_leads_record(record_id, update_fields)
+            _invalidate_leads_cache()
+            return {"ok": True, "message": "深度补搜完成", "data": deep}
+    except Exception as e:
+        print(f"[enrich] 手动补搜失败 ({record_id}): {e}")
+        _update_leads_record(record_id, {"补搜状态": "补搜失败"})
+        return JSONResponse({"ok": False, "message": f"补搜失败：{e}"}, status_code=502)
+
+
 async def _scheduled_leads_search():
-    """定时任务：每天9:00/15:00自动搜索线索并写入公海池"""
+    """定时任务：每天9:00/15:00自动搜索线索并写入公海池，后台启动补搜"""
     print(f"[scheduler] 定时搜索开始: {datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')}")
     try:
         raw_leads = _run_lead_search(max_results=30)
@@ -3226,6 +3618,7 @@ async def _scheduled_leads_search():
         tid = _ensure_leads_table()
         now_iso = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
         written = 0
+        leads_with_record_ids = []
         for lead in new_leads:
             score = await call_coze_scoring_workflow(lead)
             lead["score"] = score
@@ -3246,14 +3639,27 @@ async def _scheduled_leads_search():
                 "跟进备注": "",
                 "邮箱来源": "",
                 "综合评分": score,
+                "补搜状态": "未补搜",
+                "官网": "",
+                "行业": "",
+                "邮箱格式": "",
+                "决策人": "",
+                "LinkedIn": "",
+                "进口记录": "",
             }
             try:
-                _feishu_api("POST", f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records", {"fields": fields})
+                resp = _feishu_api("POST", f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records", {"fields": fields})
+                record_id = resp.get("data", {}).get("record", {}).get("record_id", "")
+                lead["_record_id"] = record_id
+                leads_with_record_ids.append(lead)
                 written += 1
             except Exception as we:
                 print(f"[scheduler] 写入线索失败: {we}")
         _invalidate_leads_cache()
-        print(f"[scheduler] 定时搜索完成，新增 {written}/{len(new_leads)} 条线索")
+        # 启动后台补搜
+        if leads_with_record_ids:
+            _start_enrichment_background(leads_with_record_ids)
+        print(f"[scheduler] 定时搜索完成，新增 {written}/{len(new_leads)} 条线索，补搜已启动")
     except Exception as e:
         print(f"[scheduler] 定时搜索异常: {e}")
 
