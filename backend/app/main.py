@@ -2671,11 +2671,20 @@ def _rule_fallback_score(lead_info: dict) -> int:
     return min(100, base_score + bonus)
 
 
+def _get_sales_coze_pat() -> str:
+    """销售系统（线索打分/开发信）专用PAT：优先读独立变量 COZE_SALES_PAT，
+    避免与背景图功能共用的 COZE_PAT 互相影响。未配置则返回空串由调用方回退。"""
+    return (os.getenv("COZE_SALES_PAT", "")
+            or getattr(settings, "COZE_SALES_PAT", "")
+            or getattr(settings, "coze_sales_pat", "") or "")
+
+
 def _coze_workflow_run(workflow_id: str, parameters: dict, timeout: int = 60) -> dict:
     """同步调用 Coze workflow/run，返回解析后的输出 dict。失败抛异常。
     输出约定：工作流结束节点返回的字段会被组装进 data（JSON字符串）。"""
     import urllib.request as _ur
-    pat = getattr(settings, "COZE_PAT", "") or getattr(settings, "coze_pat", "") or ""
+    pat = (_get_sales_coze_pat()
+           or getattr(settings, "COZE_PAT", "") or getattr(settings, "coze_pat", "") or "")
     if not pat or not workflow_id:
         raise RuntimeError("COZE_PAT 或 workflow_id 未配置")
     payload = {"workflow_id": workflow_id, "parameters": parameters}
@@ -2736,7 +2745,8 @@ async def call_coze_scoring_workflow(lead_info: dict) -> int:
     工作流不可用/解析失败/超时 → 规则兜底，保证主流程不中断。"""
     wf_id = (getattr(settings, "COZE_LEAD_SCORE_WORKFLOW_ID", None)
              or getattr(settings, "coze_lead_score_workflow_id", "") or "")
-    pat = getattr(settings, "COZE_PAT", "") or getattr(settings, "coze_pat", "") or ""
+    pat = (_get_sales_coze_pat()
+           or getattr(settings, "COZE_PAT", "") or getattr(settings, "coze_pat", "") or "")
     if not pat or not wf_id:
         return _rule_fallback_score(lead_info)
     parameters = {
@@ -3904,7 +3914,8 @@ async def api_emails_generate(req: EmailGenerateRequest, request: Request):
     subject, body = "", ""
     try:
         wf_id = _settings_val("coze_email_workflow_id", "")
-        pat = getattr(settings, "COZE_PAT", "") or getattr(settings, "coze_pat", "") or ""
+        pat = (_get_sales_coze_pat()
+               or getattr(settings, "COZE_PAT", "") or getattr(settings, "coze_pat", "") or "")
         if wf_id and pat and info["company_name"]:
             try:
                 parameters = {
