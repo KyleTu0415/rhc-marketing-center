@@ -4237,10 +4237,73 @@ def _smtp_send_mail(to_addrs, subject, body, cc=None,
 
 async def send_email(to_addrs, subject, body, cc=None,
                      sender_email=None, sender_password=None) -> str:
-    """异步发信：to_thread 包装同步 SMTP，返回实际发件地址。"""
+    """异步发信。优先走 Resend（HTTPS/443，适配 Railway 封出站 SMTP 的环境）；
+    未配置 RESEND_API_KEY 或显式传入销售自己的 SMTP 账号时，回退原生 SMTP。
+    返回实际发件地址。"""
+    # 显式传入 sender_email/password（多销售用自己邮箱登录 SMTP）时，走 SMTP
+    use_personal_smtp = bool((sender_email or "").strip() and (sender_password or "").strip())
+    resend_key = (os.environ.get("RESEND_API_KEY", "") or "").strip()
+    if resend_key and not use_personal_smtp:
+        try:
+            return await asyncio.to_thread(
+                _resend_send_mail, to_addrs, subject, body, cc, resend_key)
+        except Exception as e:
+            # Resend 失败不再回退 SMTP（Railway 下 SMTP 必然超时，只会拖30秒）；直接抛出明确错误
+            print(f"[email] Resend 发信失败: {e}")
+            raise RuntimeError(f"Resend 发信失败：{e}")
     return await asyncio.to_thread(
         _smtp_send_mail, to_addrs, subject, body, cc,
         sender_email, sender_password)
+
+
+def _resend_send_mail(to_addrs, subject, body, cc, api_key) -> str:
+    """同步走 Resend HTTPS API（443）。返回发件邮箱。Railway 等只放行443的环境可用。"""
+    import json as _json
+    import urllib.request as _ur
+    import urllib.error as _ue
+    to_list = _split_mail_addrs(to_addrs)
+    cc_list = _split_mail_addrs(cc)
+    if not to_list:
+        raise RuntimeError("收件人邮箱不能为空")
+    smtp_user = _settings_val("smtp_user", "")
+    from_name = _settings_val("smtp_from_name", "RHC Veterinary Medical")
+    # 发件人：Resend 域名验证通过后可用该域名下任意地址；默认沿用系统配置的发件账号
+    from_addr = (os.environ.get("RESEND_FROM_EMAIL", "").strip()
+                 or smtp_user or "onboarding@resend.dev")
+    sender = f"{from_name} <{from_addr}>"
+    payload = {
+        "from": sender,
+        "to": to_list,
+        "subject": subject or "",
+        "text": body or "",
+    }
+    if cc_list:
+        payload["cc"] = cc_list
+    # Resend 沙箱/测试开关：RESEND_DRY_RUN=1 时不真实投递
+    if (os.environ.get("RESEND_DRY_RUN", "").strip().lower() in ("1", "true", "yes")):
+        print(f"[email] RESEND_DRY_RUN 跳过真实投递 -> {to_list} | {subject}")
+        return from_addr
+    req = _ur.Request(
+        "https://api.resend.com/emails",
+        data=_json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "rhc-marketing/1.0",
+        },
+        method="POST")
+    try:
+        with _ur.urlopen(req, timeout=20) as r:
+            resp = _json.loads(r.read().decode("utf-8", "ignore") or "{}")
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "ignore")[:300]
+        except Exception:
+            pass
+        raise RuntimeError(f"Resend HTTP {e.code}: {detail}")
+    print(f"[email] Resend 已发送 id={resp.get('id', '')} -> {', '.join(to_list)}")
+    return from_addr
 
 
 # ------------------------------------------------------------
