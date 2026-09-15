@@ -2628,44 +2628,129 @@ def _build_search_queries():
     return queries
 
 
-def _search_ddg_leads(query: str, timeout: int = 8) -> list:
-    """DuckDuckGo HTML搜索，返回 [{title, url, snippet}]"""
-    import urllib.parse as _up
+# 主动获客抓取层诊断（最近一次搜索各引擎真实状态），供API返显到界面
+_lead_search_diag = {"engine_status": {}, "last_ok_engine": "", "ts": 0.0}
+
+
+def _http_fetch(url, headers, timeout=6, data=None):
+    """统一HTTP抓取，返回 (http_code, body_text)；HTTPError也读body，其它异常上抛。"""
     import urllib.request as _ur
     import urllib.error as _ue
-    q = _up.urlencode({"q": query})
-    url = "https://html.duckduckgo.com/html/?" + q
-    req = _ur.Request(url, headers={
+    payload = data.encode("utf-8") if isinstance(data, str) else data
+    req = _ur.Request(url, headers=headers, data=payload,
+                      method="POST" if payload is not None else "GET")
+    try:
+        with _ur.urlopen(req, timeout=timeout) as r:
+            return getattr(r, "status", 200), r.read(1_500_000).decode("utf-8", "ignore")
+    except _ue.HTTPError as e:
+        try:
+            body = e.read(300_000).decode("utf-8", "ignore")
+        except Exception:
+            body = ""
+        return e.code, body
+
+
+def _parse_ddg_html_results(html_text: str) -> list:
+    """解析 DuckDuckGo HTML 结果页，按 result__body 块配对标题与摘要（兼容属性顺序变化）。"""
+    results = []
+    parts = re.split(r'<div[^>]+class="[^"]*result__body', html_text)
+    for block in parts[1:]:
+        block = block[:4000]
+        mt = re.search(
+            r'<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+            block, re.I | re.S)
+        if not mt:
+            continue
+        href = _ddg_real_url(mt.group(1))
+        title = re.sub(r'<[^>]+>', '', mt.group(2)).strip()
+        if not href or not title:
+            continue
+        snippet = ""
+        ms = re.search(r'class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</(?:a|span)>',
+                       block, re.I | re.S)
+        if ms:
+            snippet = re.sub(r'<[^>]+>', '', ms.group(1)).strip()[:300]
+        results.append({"title": title, "url": href, "snippet": snippet})
+        if len(results) >= 8:
+            break
+    return results
+
+
+def _parse_bing_html_results(html_text: str) -> list:
+    """解析 Bing 结果页 b_algo 块，取真实外链标题与摘要，过滤搜索引擎/社媒/门户。"""
+    from urllib.parse import urlparse
+    results = []
+    skip_hosts = ("bing.com", "microsoft.com", "msn.com", "go.microsoft", "duckduckgo.com",
+                  "google.com", "facebook.com", "youtube.com", "instagram.com",
+                  "twitter.com", "x.com", "tiktok.com", "linkedin.com")
+    for block in re.split(r'<li[^>]+class="[^"]*b_algo', html_text)[1:]:
+        block = block[:5000]
+        mt = re.search(r'<h2[^>]*>\s*<a[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a>',
+                       block, re.I | re.S)
+        if not mt:
+            continue
+        href = mt.group(1)
+        title = re.sub(r'<[^>]+>', '', mt.group(2)).strip()
+        try:
+            host = urlparse(href).netloc.lower()
+        except Exception:
+            host = ""
+        if not title or not host or any(b in host for b in skip_hosts):
+            continue
+        snippet = ""
+        ms = re.search(r'<p[^>]*>(.*?)</p>', block, re.I | re.S)
+        if ms:
+            snippet = re.sub(r'<[^>]+>', '', ms.group(1)).strip()[:300]
+        results.append({"title": title, "url": href, "snippet": snippet})
+        if len(results) >= 8:
+            break
+    return results
+
+
+def _multi_engine_search(query: str, timeout: int = 6) -> list:
+    """主动获客单查询：DDG GET → DDG POST → Bing 依次兜底，命中即返回；
+    每个引擎真实状态写入 _lead_search_diag，避免静默吞错导致"假无线索"。"""
+    import urllib.parse as _up
+    base_headers = {
         "User-Agent": _FIND_UA,
         "Accept": "text/html,application/xhtml+xml",
         "Accept-Language": "en-US,en;q=0.9",
-    })
-    results = []
-    try:
-        with _ur.urlopen(req, timeout=timeout) as r:
-            html_text = r.read(1_500_000).decode("utf-8", "ignore")
-        for m in re.finditer(
-                r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
-                html_text, re.I):
-            href = _ddg_real_url(m.group(1))
-            title = re.sub(r'<[^>]+>', '', m.group(2)).strip()
-            if not href or not title:
+    }
+    q = _up.urlencode({"q": query})
+    engines = [
+        ("ddg_get", "https://html.duckduckgo.com/html/?" + q,
+         dict(base_headers), None, _parse_ddg_html_results),
+        ("ddg_post", "https://html.duckduckgo.com/html/",
+         {**base_headers, "Content-Type": "application/x-www-form-urlencoded",
+          "Referer": "https://html.duckduckgo.com/"}, q, _parse_ddg_html_results),
+        ("bing", "https://www.bing.com/search?" + _up.urlencode({"q": query, "count": "20"}),
+         dict(base_headers), None, _parse_bing_html_results),
+    ]
+    for name, url, headers, data, parser in engines:
+        try:
+            code, body = _http_fetch(url, headers, timeout, data)
+            if not body:
+                _lead_search_diag["engine_status"][name] = f"空响应(http{code})"
                 continue
-            # 找对应的 snippet
-            snippet = ""
-            snip_match = re.search(
-                re.escape(href[:30]) + r'.*?<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
-                html_text, re.I | re.S)
-            if snip_match:
-                snippet = re.sub(r'<[^>]+>', '', snip_match.group(1)).strip()[:300]
-            results.append({"title": title, "url": href, "snippet": snippet})
-            if len(results) >= 8:
-                break
-    except _ue.HTTPError:
-        pass
-    except Exception:
-        pass
-    return results
+            low_head = body[:4000].lower()
+            if "anomaly" in low_head or ("challenge" in low_head and name.startswith("ddg")):
+                _lead_search_diag["engine_status"][name] = f"被限流/验证页(http{code})"
+                continue
+            results = parser(body)
+            _lead_search_diag["engine_status"][name] = f"http{code}/解析{len(results)}条"
+            if results:
+                _lead_search_diag["last_ok_engine"] = name
+                return results
+        except Exception as e:
+            _lead_search_diag["engine_status"][name] = type(e).__name__
+            continue
+    return []
+
+
+def _search_ddg_leads(query: str, timeout: int = 8) -> list:
+    """主动获客搜索（多引擎兜底），返回 [{title, url, snippet}]。"""
+    return _multi_engine_search(query, timeout=min(timeout, 6))
+
 
 
 def _extract_company_info(title: str, snippet: str, url: str) -> dict:
@@ -3351,9 +3436,24 @@ def _run_lead_search(max_results: int = 30) -> list:
     # 按质量排序 A > B > C
     grade_order = {"A": 0, "B": 1, "C": 2}
     leads.sort(key=lambda x: grade_order.get(x.get("confidence", "C"), 3))
+    _lead_search_diag["ts"] = time.time()
     print(f"[search] 搜索诊断: 查询{min(len(queries), max_queries)}轮, "
           f"原始结果{len(all_raw)}条, 脏名过滤{dirty_dropped}条, 有效线索{len(leads)}条, "
-          f"连续空轮次{empty_rounds}" + ("（疑似被搜索引擎限流）" if empty_rounds >= 3 and not all_raw else ""))
+          f"连续空轮次{empty_rounds}, 引擎状态={_lead_search_diag['engine_status']}, "
+          f"命中引擎={_lead_search_diag['last_ok_engine'] or '无'}"
+          + ("（疑似被搜索引擎限流）" if empty_rounds >= 3 and not all_raw else ""))
+    try:
+        leads._search_diag = {
+            "queries": min(len(queries), max_queries),
+            "raw_results": len(all_raw),
+            "dirty_dropped": dirty_dropped,
+            "valid_leads": len(leads),
+            "empty_rounds": empty_rounds,
+            "engine_status": dict(_lead_search_diag["engine_status"]),
+            "last_ok_engine": _lead_search_diag["last_ok_engine"],
+        }
+    except Exception:
+        pass
     return leads
 
 
@@ -3388,6 +3488,7 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
     try:
         # 1) 执行基础搜索
         raw_leads = _run_lead_search(max_results=max_results)
+        search_diag = getattr(raw_leads, "_search_diag", None) or {}
 
         # 2) 与已有线索去重
         try:
@@ -3493,11 +3594,26 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
         c_count = sum(1 for l in new_leads if l.get("confidence") == "C")
 
         # 立即返回基础结果，后台补搜异步进行中
+        # 无新线索时给出真实原因，避免"假无线索"
+        empty_reason = ""
+        if not new_leads:
+            if search_diag.get("raw_results", 0) == 0:
+                es = search_diag.get("engine_status", {})
+                blocked = all(("限流" in str(v) or "验证" in str(v)) for v in es.values()) if es else False
+                empty_reason = ("当前免费搜索引擎对服务器IP限流，稍后可重试；"
+                                "系统已在定时任务中持续补搜。" if blocked
+                                else "本轮各搜索引擎均未返回可解析结果，可能临时受限，请稍后重试。")
+            elif not raw_leads:
+                empty_reason = "搜索到的结果均为目录页/聚合页，未能识别出真实公司，已自动过滤。"
+            else:
+                empty_reason = "本轮搜到的线索此前均已入库，暂无新增（已自动去重）。"
         return {
             "ok": True,
             "items": new_leads,
             "total": len(new_leads),
             "cached": False,
+            "empty_reason": empty_reason,
+            "diag": search_diag,
             "enrichment": "started" if leads_with_record_ids else "none",
             "stats": {
                 "total_found": len(raw_leads),

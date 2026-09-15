@@ -3256,103 +3256,30 @@ function searchNewLeads() {
   })
   .then(function(r) { return r.json(); })
   .then(function(data) {
-    var leads = data.leads || data || [];
-    if (!leads.length) {
-      list.innerHTML = '<div class="empty-state" style="padding:40px 24px"><div class="es-icon">🔍</div><div class="es-title">暂未找到新线索</div><div class="es-desc">请调整搜索条件或稍后再试</div></div>';
+    if(!data||data.ok===false){
+      list.innerHTML='<div class="empty-state" style="padding:40px 24px"><div class="es-icon">⚠️</div><div class="es-title">搜索失败</div><div class="es-desc">'+escHtml((data&&(data.message||data.error))||'请稍后重试')+'</div></div>';
       return;
     }
-    countEl.textContent = '共找到 ' + leads.length + ' 条线索';
-    var html = '';
-    for (var i = 0; i < leads.length; i++) {
-      var l = leads[i];
-      var gradeClass = (l.grade || '').toUpperCase() === 'A' ? 'grade-a' : ((l.grade || '').toUpperCase() === 'B' ? 'grade-b' : 'grade-c');
-      var gradeLabel = (l.grade || 'C') + '级';
-      
-      html += '<div class="search-lead-card" id="search-lead-' + (l.id || i) + '">'
-        + '<div class="slc-header">'
-        + '<span class="slc-grade ' + gradeClass + '">🟢 ' + gradeLabel + '</span>'
-        + '<span class="slc-region">' + (l.country || l.region || '') + '</span>'
-        + '<span class="slc-date">' + (l.date || '') + '</span>'
-        + '</div>'
-        + '<div class="slc-body">'
-        + '<div class="slc-company">' + escHtml(l.company || '') + '</div>'
-        + '<div class="slc-desc">' + escHtml(l.description || '') + '</div>';
-
-      // Products
-      if (l.products && l.products.length) {
-        html += '<div class="slc-section"><div class="slc-section-title">📦 需求产品</div><div class="slc-section-content">';
-        for (var p = 0; p < l.products.length; p++) {
-          html += '<div>' + escHtml(l.products[p].name || l.products[p]) + (l.products[p].recommend ? ' （推荐 ' + escHtml(l.products[p].recommend) + '）' : '') + '</div>';
-        }
-        html += '</div></div>';
-      }
-
-      // Contact
-      if (l.email || l.phone) {
-        html += '<div class="slc-section"><div class="slc-section-title">📧 联系方式</div><div class="slc-section-content">';
-        if (l.email) html += '<div>邮箱：' + escHtml(l.email) + '</div>';
-        if (l.phone) html += '<div>电话：' + escHtml(l.phone) + '</div>';
-        html += '</div></div>';
-      }
-
-      // Source
-      if (l.source) {
-        html += '<div class="slc-section"><div class="slc-section-title">🌐 来源</div><div class="slc-section-content">' + escHtml(l.source) + '</div></div>';
-      }
-
-      // AI suggestion
-      if (l.ai_suggestion) {
-        html += '<div class="slc-ai-tip"><strong>💡 AI建议：</strong>' + escHtml(l.ai_suggestion) + '</div>';
-      }
-
-      // Actions
-      html += '<div class="slc-actions">'
-        + '<button class="btn btn-primary btn-sm" onclick="claimSearchLead(\'' + (l.id || i) + '\')">加入跟进</button>'
-        + '<button class="btn btn-outline btn-sm" onclick="dismissSearchLead(\'' + (l.id || i) + '\')">暂不处理</button>'
-        + '</div>'
-        + '</div></div>';
+    var leads=Array.isArray(data.items)?data.items:(Array.isArray(data.leads)?data.leads:[]);
+    if(!leads.length){
+      var reason=escHtml(data.empty_reason||'请调整搜索条件或稍后再试');
+      list.innerHTML='<div class="empty-state" style="padding:40px 24px"><div class="es-icon">🔍</div><div class="es-title">暂未找到新线索</div><div class="es-desc">'+reason+'</div></div>';
+      countEl.textContent='';
+      return;
     }
-    list.innerHTML = html;
-    // 搜索完成后强制刷新公海池
+    countEl.textContent='本轮新增 '+leads.length+' 条线索，已加入下方公海池';
+    var html='';
+    for(var i=0;i<leads.length;i++){
+      html+=renderLeadCard(leads[i],'public');
+    }
+    list.innerHTML=html;
+    // 搜索完成后强制刷新公海池（新线索已入飞书表）
+    publicPoolCache=null;
     loadPublicPool(true);
   })
   .catch(function() {
     list.innerHTML = '<div class="empty-state" style="padding:40px 24px"><div class="es-icon">⚠️</div><div class="es-title">搜索失败</div><div class="es-desc">请检查网络连接后重试</div></div>';
   });
-}
-
-function claimSearchLead(leadId) {
-  var token = localStorage.getItem('rhc_auth_token');
-  var card = document.getElementById('search-lead-' + leadId);
-  if (!card) return;
-
-  fetch('/api/leads/claim', {
-    method: 'POST',
-    headers: {
-      'Authorization': 'Bearer ' + token,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ lead_id: leadId })
-  })
-  .then(function(r) { return r.json(); })
-  .then(function(data) {
-    showToast('已加入跟进', 'success');
-    card.style.opacity = '0.5';
-    var actions = card.querySelector('.slc-actions');
-    if (actions) actions.innerHTML = '<span style="font-size:12px;color:var(--color-success);font-weight:600">✓ 已认领跟进</span>';
-    publicPoolCache=null;
-    myCustomersCache=null;
-    loadPublicPool(true);
-    loadMyCustomers(true);
-  })
-  .catch(function() { showToast('认领失败，请重试', 'error'); });
-}
-
-function dismissSearchLead(leadId) {
-  var card = document.getElementById('search-lead-' + leadId);
-  if (!card) return;
-  card.style.display = 'none';
-  showToast('已跳过该线索');
 }
 
 /* ============================================================
