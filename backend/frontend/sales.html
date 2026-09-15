@@ -478,7 +478,6 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
         </button>
         <button class="btn btn-primary" onclick="searchNewLeads()">🔍 搜索新线索</button>
-        <button class="btn btn-outline-danger" id="rescore-all-btn" onclick="rescoreAllLeads()" style="display:none" title="用最新评分逻辑重新评估全部线索（含无联系方式压到50分以下）">重评全部</button>
       </div>
     </div>
     <!-- Search Results Area -->
@@ -1595,37 +1594,8 @@ function authHeaders(){
 function loadCurrentUser(){
   return fetch('/api/auth/me',{headers:authHeaders(),cache:'no-store'})
     .then(function(r){return r.ok?r.json():{ok:false}})
-    .then(function(d){if(d&&d.ok){currentUser=d.user;toggleRescoreButton()}return currentUser})
+    .then(function(d){if(d&&d.ok){currentUser=d.user}return currentUser})
     .catch(function(){return null});
-}
-function toggleRescoreButton(){
-  var btn=document.getElementById('rescore-all-btn');
-  if(btn)btn.style.display=(currentUser&&currentUser.role==='admin')?'inline-block':'none';
-}
-/* 管理员：对全部线索用最新逻辑重跑AI评分（无邮箱/官网/决策人/LinkedIn 的线索压到50分以下） */
-function rescoreAllLeads(){
-  if(!currentUser||currentUser.role!=='admin'){showToast('仅管理员可执行全量重评','error');return}
-  if(!confirm('确定对全部线索重新评分吗？\n\n将逐条调用AI重新评估并覆盖现有综合评分（约每条数秒），没有任何联系方式的线索会被压到50分以下。执行期间请勿关闭页面。'))return;
-  var btn=document.getElementById('rescore-all-btn');
-  if(btn){btn.disabled=true;btn.textContent='重评中…'}
-  fetch('/api/leads/rescore-all',{
-    method:'POST',
-    headers:Object.assign({'Content-Type':'application/json'},authHeaders())
-  }).then(function(r){return r.json().then(function(d){return {ok:r.ok,d:d}})})
-    .then(function(res){
-      var d=res.d||{};
-      if(res.ok&&d.ok){
-        showToast('重评完成：共'+d.total+'条，更新'+d.updated+'条，其中'+(d.capped_below_50||0)+'条压至50分以下'+(d.failed?('，失败'+d.failed+'条'):''),'success');
-        publicPoolCache=null;
-        myCustomersCache=null;
-        loadPublicPool(true);
-        if(typeof loadMyCustomers==='function')loadMyCustomers(true);
-      }else{
-        showToast('重评失败：'+(d.message||'请稍后重试'),'error');
-      }
-    })
-    .catch(function(){showToast('重评请求失败，请检查网络后重试','error')})
-    .finally(function(){if(btn){btn.disabled=false;btn.textContent='重评全部'}});
 }
 
 function hexToRgba(hex,alpha){

@@ -873,6 +873,48 @@ def _warmup_leads_table():
         print(f"[leads] 飞书线索表初始化失败（接口调用时将自动重试）: {e}")
 
 
+_legacy_score_migrated = False
+
+
+async def _migrate_legacy_scores():
+    """一次性静默迁移：把"可达性闸门"上线前遗留的虚高老分数校正。
+    只处理 无任何联系方式（邮箱/官网/决策人/LinkedIn）且当前评分≥50 的线索，
+    用最新逻辑重算并回写；校正后这些线索分数已<50，下次重启不再命中，故天然只跑一次、幂等。"""
+    global _legacy_score_migrated
+    if _legacy_score_migrated:
+        return
+    _legacy_score_migrated = True
+    await asyncio.sleep(20)  # 等飞书表预热完成，避免与启动建表争抢
+    try:
+        leads = _fetch_leads(force_refresh=True)
+    except Exception as e:
+        print(f"[score-migrate] 读取线索失败，跳过本次迁移: {e}")
+        return
+    fixed = 0
+    for ld in leads:
+        rid = ld.get("record_id", "")
+        if not rid or _lead_is_reachable(ld):
+            continue
+        try:
+            old = int(float(ld.get("综合评分") or 0))
+        except (TypeError, ValueError):
+            continue
+        if old < 50:
+            continue  # 已是低分，无需修正
+        try:
+            new_score = await call_coze_scoring_workflow(ld)
+            if new_score != old:
+                _update_leads_record(rid, {"综合评分": new_score})
+                fixed += 1
+                print(f"[score-migrate] 校正虚高分：{ld.get('公司/机构','')} {old} -> {new_score}")
+            await asyncio.sleep(0.3)
+        except Exception as e:
+            print(f"[score-migrate] 单条校正失败（{rid}）: {e}")
+    if fixed:
+        _invalidate_leads_cache()
+    print(f"[score-migrate] 历史评分迁移完成，共校正 {fixed} 条不可触达线索")
+
+
 def _norm_lead_record(rec: dict) -> dict:
     """飞书记录 -> 归一化字段（英文短 key 供前端使用，另附 record_id）。"""
     fl = rec.get("fields", {})
@@ -4334,43 +4376,6 @@ async def api_leads_release_by_record(record_id: str, req: ReleaseByRecordReques
         return JSONResponse({"ok": False, "message": f"释放失败：{e}"}, status_code=502)
 
 
-@app.post("/api/leads/rescore-all")
-async def api_leads_rescore_all(request: Request):
-    """对线索表全量记录用最新打分逻辑（含可达性闸门+脏名清洗）重新AI评分并回写。需JWT认证。
-    逐条调用，失败的记录跳过并计入 failed，不因单条异常中断整体。"""
-    token = _get_token_from_request(request)
-    if not token or not _verify_token(token):
-        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
-    try:
-        leads = _fetch_leads(force_refresh=True)
-    except Exception as e:
-        return JSONResponse({"ok": False, "message": f"读取线索失败：{e}"}, status_code=502)
-    updated, failed, capped = 0, 0, 0
-    results = []
-    for ld in leads:
-        rid = ld.get("record_id", "")
-        if not rid:
-            failed += 1
-            continue
-        name = ld.get("公司/机构", "") or ld.get("线索标题", "")
-        try:
-            old_score = ld.get("综合评分", "")
-            new_score = await call_coze_scoring_workflow(ld)
-            _update_leads_record(rid, {"综合评分": new_score})
-            updated += 1
-            if new_score < 50:
-                capped += 1
-            results.append({"record_id": rid, "company": name,
-                            "old": old_score, "new": new_score})
-            await asyncio.sleep(0.3)  # 降低Coze/飞书接口压力
-        except Exception as e:
-            failed += 1
-            print(f"[rescore] 重评失败（{rid} {name}）: {e}")
-    _invalidate_leads_cache()
-    return {"ok": True, "total": len(leads), "updated": updated,
-            "failed": failed, "capped_below_50": capped, "results": results}
-
-
 class EnrichLeadRequest(BaseModel):
     depth: str = "light"  # "light" 或 "deep"
 
@@ -4507,6 +4512,11 @@ async def startup_scheduler():
         print("[scheduler] APScheduler 已启动，定时任务: 每天 09:00 / 15:00 北京时间")
     except Exception as e:
         print(f"[scheduler] APScheduler 启动失败: {e}")
+    # 启动后静默校正"可达性闸门"上线前的历史虚高评分（幂等，只跑一次）
+    try:
+        asyncio.create_task(_migrate_legacy_scores())
+    except Exception as e:
+        print(f"[score-migrate] 迁移任务启动失败: {e}")
 
 
 # 启动时后台预热飞书「系统账号」表（建表+种子数据），不阻塞服务启动
