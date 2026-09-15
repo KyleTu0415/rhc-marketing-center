@@ -3629,6 +3629,51 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
         return JSONResponse({"ok": False, "message": f"搜索失败：{e}"}, status_code=502)
 
 
+@app.get("/api/debug/search-probe")
+async def api_debug_search_probe(request: Request, key: str = "", q: str = ""):
+    """【临时排障】从服务器侧真实探测三个搜索引擎的可达性与解析结果。
+    需 ?key= 与 RHC_DEBUG_KEY 一致（兜底固定串）。定位主动获客为空根因后删除。"""
+    import urllib.parse as _up
+    expected = os.environ.get("RHC_DEBUG_KEY", "") or "rhc-probe-2026"
+    if key != expected:
+        return JSONResponse({"ok": False, "message": "forbidden"}, status_code=403)
+    query = q.strip() or '"veterinary anesthesia machine" importer Brazil'
+    base_headers = {"User-Agent": _FIND_UA,
+                    "Accept": "text/html,application/xhtml+xml",
+                    "Accept-Language": "en-US,en;q=0.9"}
+    qenc = _up.urlencode({"q": query})
+    engines = [
+        ("ddg_get", "https://html.duckduckgo.com/html/?" + qenc, dict(base_headers),
+         None, _parse_ddg_html_results),
+        ("ddg_post", "https://html.duckduckgo.com/html/",
+         {**base_headers, "Content-Type": "application/x-www-form-urlencoded",
+          "Referer": "https://html.duckduckgo.com/"}, qenc, _parse_ddg_html_results),
+        ("bing", "https://www.bing.com/search?" + _up.urlencode({"q": query, "count": "20"}),
+         dict(base_headers), None, _parse_bing_html_results),
+    ]
+    out = {"ok": True, "query": query, "engines": {}}
+    for name, url, headers, data, parser in engines:
+        rec = {}
+        try:
+            code, body = _http_fetch(url, headers, 10, data)
+            rec["http"] = code
+            rec["body_len"] = len(body or "")
+            low = (body or "")[:5000].lower()
+            rec["flags"] = [w for w in ("anomaly", "challenge", "captcha", "unusual traffic",
+                                        "enable javascript") if w in low]
+            try:
+                parsed = parser(body)
+                rec["parsed"] = len(parsed)
+                rec["sample"] = [{"t": p["title"][:60], "u": p["url"][:100]} for p in parsed[:3]]
+            except Exception as pe:
+                rec["parse_error"] = f"{type(pe).__name__}: {pe}"
+            rec["head"] = re.sub(r"\s+", " ", (body or "")[:180])
+        except Exception as e:
+            rec["fetch_error"] = f"{type(e).__name__}: {e}"
+        out["engines"][name] = rec
+    return JSONResponse(out)
+
+
 # ============================================================
 # 消息通知系统（飞书「消息通知」表 + 4个API端点）
 # 门户右上角消息铃铛：未读计数、列表、标记已读、全部已读
