@@ -3642,32 +3642,40 @@ async def api_debug_search_probe(request: Request, key: str = "", q: str = "",
         return JSONResponse({"ok": False, "message": "forbidden"}, status_code=403)
 
     def _probe_one(query):
+        import urllib.parse as _up2
         base_headers = {"User-Agent": _FIND_UA,
                         "Accept": "text/html,application/xhtml+xml",
                         "Accept-Language": "en-US,en;q=0.9"}
         qenc = _up.urlencode({"q": query})
         engines = [
             ("ddg_get", "https://html.duckduckgo.com/html/?" + qenc, dict(base_headers),
-             None, _parse_ddg_html_results),
+             None, _parse_ddg_html_results, "result__a"),
             ("ddg_post", "https://html.duckduckgo.com/html/",
              {**base_headers, "Content-Type": "application/x-www-form-urlencoded",
-              "Referer": "https://html.duckduckgo.com/"}, qenc, _parse_ddg_html_results),
+              "Referer": "https://html.duckduckgo.com/"}, qenc, _parse_ddg_html_results, "result__a"),
+            ("bing", "https://www.bing.com/search?" + _up2.urlencode({"q": query, "count": "20"}),
+             dict(base_headers), None, _parse_bing_html_results, "b_algo"),
+            ("mojeek", "https://www.mojeek.com/search?" + _up2.urlencode({"q": query}),
+             dict(base_headers), None, None, "results-standard"),
         ]
         rec = {}
-        for name, url, headers, data, parser in engines:
+        for name, url, headers, data, parser, marker in engines:
             e = {}
             try:
                 code, body = _http_fetch(url, headers, 8, data)
                 e["http"] = code
                 e["len"] = len(body or "")
+                e["marker"] = (body or "").count(marker)
                 low = (body or "")[:5000].lower()
-                e["blocked"] = any(w in low for w in ("anomaly", "challenge", "captcha", "unusual traffic"))
-                try:
-                    parsed = parser(body)
-                    e["parsed"] = len(parsed)
-                    e["hosts"] = [_up.urlparse(p["url"]).netloc for p in parsed[:8]]
-                except Exception as pe:
-                    e["parse_error"] = type(pe).__name__
+                e["blocked"] = any(w in low for w in ("anomaly", "challenge", "captcha",
+                                                      "unusual traffic", "cf-browser-verification"))
+                if parser:
+                    try:
+                        parsed = parser(body)
+                        e["parsed"] = len(parsed)
+                        e["hosts"] = [_up.urlparse(p["url"]).netloc for p in parsed[:8]]
+                    except Exception as pe:
+                        e["parse_error"] = type(pe).__name__
             except Exception as ex:
                 e["fetch_error"] = type(ex).__name__
             rec[name] = e
@@ -3683,14 +3691,28 @@ async def api_debug_search_probe(request: Request, key: str = "", q: str = "",
     t0 = _time.time()
     for i, query in enumerate(queries):
         r = _probe_one(query)
-        seq.append({"i": i, "q": query,
-                    "get": r["ddg_get"].get("parsed"), "get_blocked": r["ddg_get"].get("blocked"),
-                    "post": r["ddg_post"].get("parsed"), "post_blocked": r["ddg_post"].get("blocked"),
-                    "hosts": (r["ddg_get"].get("hosts") or r["ddg_post"].get("hosts") or [])[:6]})
+        row = {"i": i, "q": query}
+        for eng in ("ddg_get", "ddg_post", "bing", "mojeek"):
+            er = r.get(eng, {})
+            row[eng] = {"p": er.get("parsed"), "m": er.get("marker"),
+                        "b": er.get("blocked"), "h": er.get("http")}
+        row["hosts"] = ((r["ddg_get"].get("hosts") or r["ddg_post"].get("hosts") or [])[:6])
+        seq.append(row)
         if i < len(queries) - 1:
-            _time.sleep(1.2)  # 与真实搜索相近的节奏
+            _time.sleep(1.2)
+    # 附一份 Bing 首页原始结构样本，便于修正解析器
+    try:
+        bh = {"User-Agent": _FIND_UA, "Accept-Language": "en-US,en;q=0.9"}
+        _, bbody = _http_fetch(
+            "https://www.bing.com/search?" + _up.urlencode({"q": queries[0], "count": "20"}),
+            bh, 8)
+        mm = re.search(r'<li class="b_algo".{0,1200}', bbody or "", re.S)
+        bing_sample = re.sub(r"\s+", " ", mm.group(0))[:900] if mm else "(no b_algo) " + re.sub(r"\s+", " ", (bbody or "")[:300])
+    except Exception as e:
+        bing_sample = f"err {e}"
     return JSONResponse({"ok": True, "mode": "seq", "count": len(seq),
-                         "elapsed_sec": round(_time.time() - t0, 1), "seq": seq})
+                         "elapsed_sec": round(_time.time() - t0, 1),
+                         "bing_sample": bing_sample, "seq": seq})
 
 
 # ============================================================
