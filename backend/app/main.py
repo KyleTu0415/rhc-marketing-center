@@ -2742,11 +2742,24 @@ def _real_email(val: str) -> bool:
     return True
 
 
+def _pick_real_website(lead_info: dict) -> str:
+    """从候选字段中挑出第一个真实企业官网；来源网址/搜索引擎页一律排除。
+    补搜成功后内存 lead 的英文 website 装的是真官网，初始搜索时它装的是来源网址，
+    故统一用 _real_website 校验过滤。"""
+    for k in ("official_website", "官网", "website"):
+        u = _lead_val(lead_info, k)
+        if _real_website(u):
+            return u
+    return ""
+
+
 def _lead_is_reachable(lead_info: dict) -> bool:
-    """可达性硬门槛：有真实邮箱 / 官网 / 决策人 / LinkedIn 任一即视为可触达。"""
+    """可达性硬门槛：有真实邮箱 / 官网 / 决策人 / LinkedIn 任一即视为可触达。
+    注意：只认真实企业官网；信号「原文链接」是来源网页（新闻/B2B目录/搜索引擎），
+    不能当作企业官网，否则无联系方式的线索会被误判为可触达。"""
     if _real_email(_lead_val(lead_info, "email_pattern", "邮箱格式", "联系邮箱", "email")):
         return True
-    if _real_website(_lead_val(lead_info, "website", "官网", "原文链接")):
+    if _pick_real_website(lead_info):
         return True
     if _lead_val(lead_info, "decision_maker", "决策人"):
         return True
@@ -2867,7 +2880,8 @@ async def call_coze_scoring_workflow(lead_info: dict) -> int:
     country = _lead_val(lead_info, "country", "国家", "地区")
     raw_product = _lead_val(lead_info, "product", "需求产品", "推荐产品")
     industry = _lead_val(lead_info, "industry", "行业")
-    website = _lead_val(lead_info, "website", "官网", "原文链接")
+    # 只认真实企业官网（补搜得到的站点）；来源网址(website在初始搜索时/原文链接)不是官网，不参与打分
+    website = _pick_real_website(lead_info)
     email_pattern = _lead_val(lead_info, "email_pattern", "邮箱格式", "联系邮箱", "email")
     grade = _lead_val(lead_info, "confidence", "评级") or "C"
 
@@ -3242,14 +3256,20 @@ def _dedup_with_existing_leads(new_leads: list, existing_leads: list) -> list:
 
 
 def _run_lead_search(max_results: int = 30) -> list:
-    """执行主动搜索核心逻辑，返回结构化线索列表"""
+    """执行主动搜索核心逻辑，返回结构化线索列表。
+    诊断计数挂在返回列表对象的 _search_diag 属性上（列表可挂自定义属性）。"""
     queries = _build_search_queries()
     all_raw = []  # [{title, url, snippet}]
     seen_urls = set()
+    empty_rounds = 0  # 连续空结果轮次，用于判断是否被搜索引擎限流
     # 限制搜索轮次，避免超时
     max_queries = min(len(queries), 20)
     for i, query in enumerate(queries[:max_queries]):
         results = _search_ddg_leads(query, timeout=6)
+        if not results:
+            empty_rounds += 1
+        else:
+            empty_rounds = 0
         for r in results:
             url = r.get("url", "").lower().strip()
             if url and url not in seen_urls:
@@ -3265,9 +3285,15 @@ def _run_lead_search(max_results: int = 30) -> list:
     # 提取公司信息
     leads = []
     seen_companies = set()
+    dirty_dropped = 0  # 脏公司名（搜索词短语）被过滤的条数
     for r in all_raw:
         info = _extract_company_info(r["title"], r.get("snippet", ""), r["url"])
         if not info["company_name"] or len(info["company_name"]) < 3:
+            continue
+        # 脏公司名过滤：搜索词式短语（含冒号/import/多关键词）不是真实公司，直接丢弃，
+        # 避免污染公海池、邮件主题与评分（如 "Brazil company: Veterinary ... import"）
+        if not _clean_company_name(info["company_name"]):
+            dirty_dropped += 1
             continue
         company_key = info["company_name"].lower().strip()
         if company_key in seen_companies:
@@ -3296,6 +3322,9 @@ def _run_lead_search(max_results: int = 30) -> list:
     # 按质量排序 A > B > C
     grade_order = {"A": 0, "B": 1, "C": 2}
     leads.sort(key=lambda x: grade_order.get(x.get("confidence", "C"), 3))
+    print(f"[search] 搜索诊断: 查询{min(len(queries), max_queries)}轮, "
+          f"原始结果{len(all_raw)}条, 脏名过滤{dirty_dropped}条, 有效线索{len(leads)}条, "
+          f"连续空轮次{empty_rounds}" + ("（疑似被搜索引擎限流）" if empty_rounds >= 3 and not all_raw else ""))
     return leads
 
 
