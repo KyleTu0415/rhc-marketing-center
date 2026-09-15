@@ -2835,18 +2835,80 @@ def _search_ddg_leads(query: str, timeout: int = 8) -> list:
 
 
 
+# 纯产品/通用名词（小写）：标题剥离这些词后若没有任何"品牌实词"，说明不是公司名
+_PRODUCT_GENERIC_WORDS = {
+    "veterinary", "vet", "animal", "pet", "hospital", "clinic", "equipment",
+    "device", "devices", "machine", "machines", "anesthesia", "anaesthesia",
+    "ventilator", "ventilators", "monitor", "monitors", "monitoring", "pump",
+    "pumps", "surgical", "medical", "medicine", "health", "healthcare",
+    "care", "product", "products", "category", "system", "systems", "supply",
+    "supplies", "new", "best", "top", "for", "sale", "price", "prices", "buy",
+    "shop", "store", "online", "wholesale", "supplier", "suppliers",
+    "manufacturer", "manufacturers", "distributor", "dealer", "importer",
+    "exporter", "trade", "trading", "the", "and", "of", "in", "with", "co",
+    "inc", "ltd", "llc", "gmbh", "corp", "group",
+}
+
+
+def _brand_from_domain(url: str) -> str:
+    """从企业域名推断品牌名：apexx-equipment.com -> Apexx Equipment。
+    去掉 www、地区/通用二级域和公共后缀，连字符/点拆词后首字母大写。无法判断返回空串。"""
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(url).netloc.lower().split(":")[0]
+        parts = [p for p in re.split(r"[.\-]", host) if p]
+        drop = {"www", "shop", "store", "online", "get", "buy", "us", "uk", "eu",
+                "co", "com", "org", "net", "io", "de", "fr", "br", "com.br",
+                "co.uk", "info", "biz", "gmbh", "ltd"}
+        words = [p for p in parts if p not in drop and not p.isdigit() and len(p) > 1]
+        if not words:
+            return ""
+        brand = " ".join(words).replace("_", " ")
+        # 全是产品通名词则不算品牌
+        toks = re.findall(r"[a-z]+", brand.lower())
+        if toks and all(t in _PRODUCT_GENERIC_WORDS for t in toks):
+            return ""
+        return " ".join(w.capitalize() for w in brand.split())
+    except Exception:
+        return ""
+
+
+def _is_product_phrase(name: str) -> bool:
+    """标题/公司名是否只是纯产品短语（没有任何品牌专名）。"""
+    if not name:
+        return True
+    toks = [t for t in re.findall(r"[a-z0-9]+", name.lower())]
+    if not toks:
+        return True
+    brand_words = [t for t in toks if t not in _PRODUCT_GENERIC_WORDS]
+    return len(brand_words) == 0
+
+
+# 电商货架/购物路径特征：在线商店的商品分类/购物车页，是同行卖家货架而非买家主体
+_SELLER_PATH_MARKS = (
+    "/product-category/", "/product-categories/", "/collections/",
+    "/shop/", "/store/", "/cart", "/checkout", "/wishlist",
+)
+
+
+def _is_seller_or_section_url(url: str) -> bool:
+    u = (url or "").lower().split("?")[0].rstrip("/")
+    return any(mark in u for mark in _SELLER_PATH_MARKS)
+
+
 def _extract_company_info(title: str, snippet: str, url: str) -> dict:
     """从搜索结果中提取公司信息"""
     text = f"{title} {snippet}".lower()
     # 提取公司名（title中第一个有意义的词组）
-    company = title.split("|")[0].split("-")[0].split(",")[0].strip()
+    company = title.split("|")[0].split("-")[0].split(",")[0].split("–")[0].strip()
     # 去掉通用词
     for word in ["veterinary", "animal", "hospital", "equipment", "supplier",
                   "importer", "distributor", "wholesale", "official"]:
         company = company.replace(word, " ").strip()
     company = re.sub(r'\s+', ' ', company).strip()
-    if len(company) < 3:
-        company = title[:40].strip()
+    # 剥离后若只是纯产品短语（无品牌），尝试用域名品牌；域名也推不出则留空（上层丢弃）
+    if _is_product_phrase(company):
+        company = _brand_from_domain(url)
 
     # 识别国家
     country = ""
@@ -3488,11 +3550,17 @@ def _run_lead_search(max_results: int = 30) -> list:
     leads = []
     seen_companies = set()
     dirty_dropped = 0  # 脏公司名（搜索词短语）被过滤的条数
+    seller_dropped = 0  # 同行卖家货架页被过滤的条数
     for r in all_raw:
+        # 电商货架/购物路径（如 /product-category/...）是同行卖家商品页，不是买家主体，丢弃
+        if _is_seller_or_section_url(r.get("url", "")):
+            seller_dropped += 1
+            continue
         info = _extract_company_info(r["title"], r.get("snippet", ""), r["url"])
         if not info["company_name"] or len(info["company_name"]) < 3:
+            dirty_dropped += 1
             continue
-        # 脏公司名过滤：搜索词式短语（含冒号/import/多关键词）不是真实公司，直接丢弃，
+        # 脏公司名过滤：搜索词式短语（含冒号/import/多关键词/纯产品词）不是真实公司，直接丢弃，
         # 避免污染公海池、邮件主题与评分（如 "Brazil company: Veterinary ... import"）
         if not _clean_company_name(info["company_name"]):
             dirty_dropped += 1
@@ -3526,7 +3594,8 @@ def _run_lead_search(max_results: int = 30) -> list:
     leads.sort(key=lambda x: grade_order.get(x.get("confidence", "C"), 3))
     _lead_search_diag["ts"] = time.time()
     print(f"[search] 搜索诊断: 查询{min(len(queries), max_queries)}轮, "
-          f"原始结果{len(all_raw)}条, 脏名过滤{dirty_dropped}条, 有效线索{len(leads)}条, "
+          f"原始结果{len(all_raw)}条, 脏名过滤{dirty_dropped}条, 卖家页过滤{seller_dropped}条, "
+          f"有效线索{len(leads)}条, "
           f"连续空轮次{empty_rounds}, 引擎状态={_lead_search_diag['engine_status']}, "
           f"命中引擎={_lead_search_diag['last_ok_engine'] or '无'}"
           + ("（疑似被搜索引擎限流）" if empty_rounds >= 3 and not all_raw else ""))
@@ -3535,6 +3604,7 @@ def _run_lead_search(max_results: int = 30) -> list:
             "queries": min(len(queries), max_queries),
             "raw_results": len(all_raw),
             "dirty_dropped": dirty_dropped,
+            "seller_dropped": seller_dropped,
             "valid_leads": len(leads),
             "empty_rounds": empty_rounds,
             "engine_status": dict(_lead_search_diag["engine_status"]),
