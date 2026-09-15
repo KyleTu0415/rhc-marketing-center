@@ -3002,7 +3002,7 @@ function renderPublicPool(){
   var claimerName=getClaimerName();
   if(stats)stats.textContent='共 '+publicPoolLeads.length+' 条公海线索 · 按综合评分降序排列';
   if(!publicPoolLeads.length){
-    el.innerHTML='<div class="empty-state"><div class="es-icon">'+SIGNAL_ICON_RSS+'</div><div class="es-title">暂无可认领的商机</div><div class="es-desc">系统将在每天9:00和15:00自动刷新，也可点击「搜索新线索」手动获取。</div></div>';
+    el.innerHTML='<div class="empty-state"><div class="es-icon">'+SIGNAL_ICON_RSS+'</div><div class="es-title">暂无可认领的商机</div><div class="es-desc">点击右上角「搜索新线索」，系统将实时全网检索南美/非洲/欧洲/东南亚的兽用器械买家。</div></div>';
     return;
   }
   var html='<div class="lead-public-grid">';
@@ -3012,7 +3012,7 @@ function renderPublicPool(){
 }
 /* 补搜状态徽章 */
 function buildEnrichStatusHtml(status){
-  if(!status||status==='未补搜'||status==='轻补搜中'){
+  if(status==='轻补搜中'){
     return '<span class="enrich-status enrich-status-pending"><span class="enrich-spinner"></span> 补全中…</span>';
   }else if(status==='已轻补'){
     return '<span class="enrich-status enrich-status-light">✓ 基础信息</span>';
@@ -3020,9 +3020,12 @@ function buildEnrichStatusHtml(status){
     return '<span class="enrich-status enrich-status-deep"><span class="enrich-spinner"></span> 深度补全中…</span>';
   }else if(status==='已深度补全'){
     return '<span class="enrich-status enrich-status-deep">✓✓ 完整信息</span>';
+  }else if(status==='已检索·未找到联系方式'){
+    return '<span class="enrich-status enrich-status-failed">已检索·暂未找到联系方式</span>';
   }else if(status==='补搜失败'){
     return '<span class="enrich-status enrich-status-failed">⚠ 补搜失败</span>';
   }
+  // 未补搜 / 空：静止状态，不显示转圈（避免误以为一直在补全）
   return '';
 }
 /* 补全信息按钮 */
@@ -3030,43 +3033,48 @@ function buildEnrichButtonHtml(rid,status){
   if(status==='已深度补全'){
     return '<button type="button" class="btn-enrich btn-enrich-done" disabled>✓ 信息完整</button>';
   }
+  if(status==='已检索·未找到联系方式'){
+    return '<button type="button" class="btn-enrich" id="enrich-btn-'+esc(String(rid))+'" onclick="enrichLead(\''+esc(String(rid))+'\',this)">↻ 重新检索</button>';
+  }
   return '<button type="button" class="btn-enrich" id="enrich-btn-'+esc(String(rid))+'" onclick="enrichLead(\''+esc(String(rid))+'\',this)">🔍 补全信息</button>';
 }
 /* 补全信息：POST /api/leads/{record_id}/enrich */
 function enrichLead(rid,btn){
   if(!rid)return;
   if(btn){btn.disabled=true;btn.innerHTML='<span class="enrich-spinner"></span> 补全中…'}
+  function resetBtn(){
+    if(btn){btn.disabled=false;btn.innerHTML='🔍 补全信息';}
+  }
+  // 前端40秒硬超时：后端深度补全已限25秒，留余量；超时不再无限转圈
+  var ctrl=null,timer=null;
+  try{ctrl=new AbortController();timer=setTimeout(function(){ctrl.abort();},40000);}catch(e){}
   fetch('/api/leads/'+encodeURIComponent(rid)+'/enrich',{
     method:'POST',
     headers:Object.assign({'Content-Type':'application/json'},authHeaders()),
-    body:JSON.stringify({depth:'deep'})
+    body:JSON.stringify({depth:'deep'}),
+    signal:ctrl?ctrl.signal:undefined
   }).then(function(r){
     return r.json().then(function(d){return {status:r.status,data:d}});
   }).then(function(res){
+    if(timer)clearTimeout(timer);
     if(res.status===200&&res.data&&res.data.ok){
-      // 更新缓存中对应条目
-      var updated=res.data.item||res.data.lead||res.data;
-      if(updated&&publicPoolCache){
-        for(var i=0;i<publicPoolCache.items.length;i++){
-          var item=publicPoolCache.items[i];
-          var iid=item.record_id||item.id||'';
-          if(String(iid)===String(rid)){
-            publicPoolCache.items[i]=Object.assign({},item,updated);
-            break;
-          }
-        }
-      }
-      // 局部刷新该卡片
-      publicPoolLeads=publicPoolCache?publicPoolCache.items:publicPoolLeads;
-      renderPublicPool();
-      showToast('信息补全完成','success');
+      // 后端已落库：强制重拉公海拿到最新补搜状态与字段（响应体未回整条记录，不做本地合并）
+      publicPoolCache=null;
+      loadPublicPool(true);
+      showToast(res.data.found_any===false?'已检索，暂未找到决策人/LinkedIn/进口记录':'信息补全完成',
+                res.data.found_any===false?'warn':'success');
     }else{
-      if(btn){btn.disabled=false;btn.innerHTML='🔍 补全信息'}
+      resetBtn();
       showToast((res.data&&(res.data.message||res.data.detail))||'补全失败，请稍后重试','error');
     }
-  }).catch(function(){
-    if(btn){btn.disabled=false;btn.innerHTML='🔍 补全信息'}
-    showToast('网络异常，补全失败','error');
+  }).catch(function(err){
+    if(timer)clearTimeout(timer);
+    resetBtn();
+    if(err&&err.name==='AbortError'){
+      showToast('补全超时（免费搜索引擎当前可能被限流），请稍后再试或明天接入 Brave 后重试','error');
+    }else{
+      showToast('网络异常，补全失败','error');
+    }
   });
 }
 /* 渐进式补搜轮询 */

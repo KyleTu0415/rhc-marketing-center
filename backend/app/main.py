@@ -2847,6 +2847,12 @@ _PRODUCT_GENERIC_WORDS = {
     "manufacturer", "manufacturers", "distributor", "dealer", "importer",
     "exporter", "trade", "trading", "the", "and", "of", "in", "with", "co",
     "inc", "ltd", "llc", "gmbh", "corp", "group",
+    # 西语/葡语产品通名（南美/西班牙/葡萄牙市场标题常用）
+    "maquina", "maquinas", "máquina", "máquinas", "de", "del", "la", "el", "y",
+    "anestesia", "veterinaria", "veterinário", "veterinaria", "equipos",
+    "equipamento", "equipamentos", "mascotas", "mascote", "animalia",
+    "para", "com", "por", "venta", "precio", "compra", "produto", "produtos",
+    "producto", "productos", "categoria", "categoría", "tienda",
 }
 
 
@@ -2884,10 +2890,12 @@ def _is_product_phrase(name: str) -> bool:
     return len(brand_words) == 0
 
 
-# 电商货架/购物路径特征：在线商店的商品分类/购物车页，是同行卖家货架而非买家主体
+# 电商货架/购物路径特征：在线商店的商品详情/分类/购物车页，是同行卖家货架而非买家主体
 _SELLER_PATH_MARKS = (
+    "/product/", "/products/",  # 单数商品详情页与复数商品列表页（zzolive.com/products/...）
     "/product-category/", "/product-categories/", "/collections/",
     "/shop/", "/store/", "/cart", "/checkout", "/wishlist",
+    "/item/", "/goods/", "/categoria/", "/categorias/", "/produto/", "/produtos/",
 )
 
 
@@ -3307,6 +3315,9 @@ async def deep_enrich_lead(company_name: str, country: str, website: str = "") -
     """深度补搜：决策人、LinkedIn、进口记录
     组合多维度搜索，提取关键商务信息"""
     result = {"decision_maker": "", "linkedin": "", "import_record": ""}
+    loop = asyncio.get_event_loop()
+    # 总时限25秒：避免机房IP被免费搜索引擎限流时，多次重试把请求拖到几分钟无响应
+    deadline = loop.time() + 25
     try:
         queries = [
             f'"{company_name}" {country} CEO director manager contact',
@@ -3315,15 +3326,24 @@ async def deep_enrich_lead(company_name: str, country: str, website: str = "") -
         ]
         all_text = ""
         for q in queries:
-            sr = await asyncio.get_event_loop().run_in_executor(
-                None, _search_ddg_single, q, _ENRICH_TIMEOUT)
+            if loop.time() >= deadline:
+                break
+            remaining = max(2.0, deadline - loop.time())
+            try:
+                # 走多引擎（有Brave key用Brave，否则DDG/Bing兜底），单查询最多8秒
+                sr = await asyncio.wait_for(
+                    loop.run_in_executor(None, _search_ddg_leads, q, 8),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError:
+                break
             for item in sr:
                 all_text += " " + item.get("title", "") + " " + item.get("snippet", "")
                 # 提取LinkedIn链接
                 u = item.get("url", "")
                 if "linkedin.com" in u and company_name.lower().split()[0] in u.lower():
                     result["linkedin"] = u
-            await asyncio.sleep(_ENRICH_DELAY)
+            await asyncio.sleep(min(_ENRICH_DELAY, max(0.0, deadline - loop.time())))
 
         # 提取决策人姓名（从标题/摘要中找常见模式）
         dm_patterns = [
@@ -4765,7 +4785,9 @@ async def api_leads_enrich(record_id: str, req: Optional[EnrichLeadRequest] = No
         else:
             _update_leads_record(record_id, {"补搜状态": "深度补搜中"})
             deep = await deep_enrich_lead(company_name, country, website)
-            update_fields = {"补搜状态": "已深度补全"}
+            found_any = bool(deep.get("decision_maker") or deep.get("linkedin") or deep.get("import_record"))
+            # 三个关键字段都没找到时如实标记，不谎报"完整信息"
+            update_fields = {"补搜状态": "已深度补全" if found_any else "已检索·未找到联系方式"}
             if deep.get("decision_maker"):
                 update_fields["决策人"] = deep["decision_maker"]
             if deep.get("linkedin"):
@@ -4774,7 +4796,7 @@ async def api_leads_enrich(record_id: str, req: Optional[EnrichLeadRequest] = No
                 update_fields["进口记录"] = deep["import_record"]
             _update_leads_record(record_id, update_fields)
             _invalidate_leads_cache()
-            return {"ok": True, "message": "深度补搜完成", "data": deep}
+            return {"ok": True, "message": "深度补搜完成" if found_any else "已检索，暂未找到决策人/LinkedIn/进口记录", "data": deep, "found_any": found_any}
     except Exception as e:
         print(f"[enrich] 手动补搜失败 ({record_id}): {e}")
         _update_leads_record(record_id, {"补搜状态": "补搜失败"})
