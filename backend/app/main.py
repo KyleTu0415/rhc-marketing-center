@@ -4971,6 +4971,34 @@ async def api_admin_cleanup_fake_leads(request: Request):
     if mode == "scan":
         return {"ok": True, "mode": "scan", "count": len(candidates), "candidates": candidates,
                 "total_leads": len(leads)}
+    if mode == "net_probe":
+        # 出站网络精确诊断：DNS 解析族 + 对 SMTP 465/587 与对照组(飞书443)分别强制 IPv4/IPv6 拨号
+        import socket as _sk
+        host = _settings_val("smtp_host", "smtp.exmail.qq.com")
+        targets = [(host, 465, "SMTP_SSL"), (host, 587, "SMTP_STARTTLS"),
+                   ("open.feishu.cn", 443, "CONTROL_HTTPS"),
+                   ("www.baidu.com", 443, "CONTROL_BAIDU")]
+        dns = []
+        try:
+            for fam, stype, proto, canon, sa in _sk.getaddrinfo(host, 465, type=_sk.SOCK_STREAM):
+                dns.append({"family": "IPv6" if fam == _sk.AF_INET6 else "IPv4", "ip": sa[0]})
+        except Exception as e:
+            dns.append({"dns_error": f"{type(e).__name__}: {e}"})
+        results = []
+        for h, port, tag in targets:
+            for fam_name, fam in (("IPv4", _sk.AF_INET), ("IPv6", _sk.AF_INET6)):
+                try:
+                    infos = _sk.getaddrinfo(h, port, fam, _sk.SOCK_STREAM)
+                    ip = infos[0][4][0]
+                    s = _sk.socket(fam, _sk.SOCK_STREAM)
+                    s.settimeout(8)
+                    s.connect((ip, port))
+                    s.close()
+                    results.append({"target": tag, "family": fam_name, "ip": ip, "port": port, "connect": "ok"})
+                except Exception as e:
+                    results.append({"target": tag, "family": fam_name, "port": port,
+                                    "connect": "fail", "error": f"{type(e).__name__}: {e}"})
+        return {"ok": True, "dns": dns, "connects": results}
     if mode == "smtp_probe":
         # 临时SMTP自检：在Railway出口直连腾讯企业邮，区分"出口被封"与"业务逻辑"问题
         import smtplib as _sm
