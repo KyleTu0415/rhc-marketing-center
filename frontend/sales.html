@@ -80,6 +80,8 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
 .btn-primary:disabled{opacity:.6;cursor:not-allowed}
 .btn-outline{border:1px solid var(--color-border);color:var(--color-text-secondary);background:var(--color-surface)}
 .btn-outline:hover{border-color:var(--color-primary);color:var(--color-primary)}
+.btn-outline-danger{border:1px solid var(--color-danger);color:var(--color-danger);background:var(--color-surface)}
+.btn-outline-danger:hover{background:#FDECEC;border-color:var(--color-danger);color:var(--color-danger)}
 .btn-sm{padding:6px 12px;font-size:12px}
 .form-group{margin-bottom:16px}
 .form-group label{display:block;font-size:12px;font-weight:600;color:var(--color-text-secondary);letter-spacing:0.5px;margin-bottom:6px}
@@ -917,6 +919,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
       </div>
     </div>
     <div class="cd-modal-footer">
+      <button type="button" class="btn btn-outline-danger cd-release-btn" id="cd-release-btn" onclick="releaseLead()" style="display:none;margin-right:auto">释放回公海</button>
       <button type="button" class="btn btn-outline" onclick="closeCustomerDetail()">取消</button>
       <button type="button" class="btn btn-primary" id="cd-send-btn" onclick="sendCustomerEmail()">📤 发送</button>
     </div>
@@ -1945,7 +1948,7 @@ function renderLeads(){
       if(url)actions.push('<a class="btn btn-outline btn-sm" href="'+esc(url)+'" target="_blank" rel="noopener noreferrer">查看原文 ↗</a>');
       actions.push('<button type="button" class="btn btn-primary btn-sm" onclick="writeLeadMail(\''+esc(rid)+'\')">写开发信</button>');
       actions.push('<button type="button" class="btn btn-outline btn-sm" onclick="saveLead(\''+esc(rid)+'\',this)">保存</button>');
-      actions.push('<button type="button" class="btn btn-outline btn-sm" style="color:var(--color-danger)" onclick="releaseLead(\''+esc(rid)+'\')">释放</button>');
+      actions.push('<button type="button" class="btn btn-outline btn-sm" style="color:var(--color-danger)" onclick="releaseLead(\''+esc(rid)+'\','+jsStrQ(company)+')">释放</button>');
       actionsHtml='<div class="lead-actions" style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">'+actions.join('')+'</div>';
     }else{
       var ro=[];
@@ -2002,22 +2005,54 @@ function saveLead(rid,btn){
       showToast('网络异常，保存失败','error');
     });
 }
-function releaseLead(rid){
-  if(!confirm('确定释放该线索？释放后信号回到公共池，其他销售可以认领。'))return;
-  fetch('/api/leads/'+encodeURIComponent(rid),{
-    method:'PUT',
-    headers:Object.assign({'Content-Type':'application/json'},authHeaders()),
-    body:JSON.stringify({status:'已释放'})
+/* 生成可安全嵌入单引号 JS 字符串字面量的转义文本（用于 onclick 属性内拼接，输出已可直接放入 '...' 中） */
+function jsStrQ(s){
+  return "'"+String(s==null?'':s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\r/g,'').replace(/\n/g,'\\n')+"'";
+}
+/* 释放客户（退回公海）：POST /api/leads/release/{record_id}
+   rid/companyName 可省略：在客户详情弹窗中调用时取当前打开的客户。
+   释放后跟进状态、发信历史、评分均保留，客户回到公海可被他人认领。 */
+function releaseLead(rid,companyName){
+  if(rid==null&&currentDetailLead){rid=currentDetailLead.rid;}
+  if(companyName==null&&currentDetailLead){companyName=currentDetailLead.company;}
+  rid=String(rid==null?'':rid);
+  companyName=String(companyName||'该客户');
+  if(!rid){showToast('缺少客户标识，无法释放','error');return}
+  var releaser=getClaimerName();
+  if(!releaser){
+    var input=prompt('请输入你的姓名（用于释放归属校验）：');
+    if(!input)return;
+    releaser=input.trim();
+    localStorage.setItem('rhc_claimer_name',releaser);
+  }
+  if(!confirm('确定释放 '+companyName+' 回公海池吗？\n\n释放后其他销售可认领，跟进记录与开发信历史会保留。'))return;
+  var reqHeaders=Object.assign({'Content-Type':'application/json'},authHeaders());
+  reqHeaders['X-Sales-Id']=releaser;
+  fetch('/api/leads/release/'+encodeURIComponent(rid),{
+    method:'POST',
+    headers:reqHeaders,
+    body:JSON.stringify({releaser:releaser})
   }).then(function(r){return r.json().then(function(d){return {status:r.status,data:d}})})
     .then(function(res){
-      if(res.status===200&&res.data&&res.data.ok){
-        showToast('线索已释放，信号回到公共池','success');
-        loadLeads();
-        loadSignals();
+      var d=res.data||{};
+      if(res.status===200&&d.ok!==false){
+        showToast((d&&d.message)||'已释放回公海池','success');
+        // 失效两个缓存并强制刷新，避免残留假状态
+        publicPoolCache=null;
+        myCustomersCache=null;
+        loadPublicPool(true);
+        loadMyCustomers(true);
+        updateMcBadge();
+        // 详情弹窗正显示该客户则关闭
+        if(currentDetailLead&&String(currentDetailLead.rid)===rid){closeCustomerDetail();}
+      }else if(res.status===401){
+        showToast('登录已过期，请重新登录','error');
       }else{
-        showToast((res.data&&res.data.message)||'释放失败，请稍后重试','error');
+        showToast((d&&(d.message||d.error||d.detail))||'释放失败，请稍后重试','error');
       }
-    }).catch(function(){showToast('网络异常，释放失败','error')});
+    }).catch(function(e){
+      showToast('网络异常，释放失败：'+(e&&e.message?e.message:''),'error');
+    });
 }
 function manualSearchLead(rid){
   var ld=leadsAll.filter(function(x){return x.record_id===rid})[0];
@@ -2943,6 +2978,7 @@ function renderLeadCard(ld,scope){
   if(scope==='mine'){
     h+='<button type="button" class="btn btn-primary btn-sm" onclick="openCustomerDetail(\''+ridAttr+'\',\'mine\',true)">✉️ 写开发信</button>';
     h+='<button type="button" class="btn btn-outline btn-sm" onclick="openCustomerDetail(\''+ridAttr+'\',\'mine\',false)">查看详情</button>';
+    h+='<button type="button" class="btn btn-outline-danger btn-sm" onclick="releaseLead('+jsStrQ(n.rid)+','+jsStrQ(n.company)+')">释放</button>';
   }else if(n.isClaimed){
     if(isMine){
       h+='<button type="button" class="btn btn-primary btn-sm" onclick="openCustomerDetail(\''+ridAttr+'\',\'public\',true)">✉️ 写开发信</button>';
@@ -3385,6 +3421,9 @@ function openCustomerDetail(rid,scope,writeMode){
   genNote.textContent='';genNote.className='cd-gen-note';
 
   document.getElementById('customer-detail-modal').classList.add('show');
+  // 仅当前销售本人认领时显示「释放回公海」；非本人/未认领不显示
+  var releaseBtn=document.getElementById('cd-release-btn');
+  if(releaseBtn)releaseBtn.style.display=(n.isClaimed&&claimerName&&n.claimer===claimerName)?'':'none';
   loadEmailHistory(n.rid);
   if(writeMode){
     setTimeout(function(){

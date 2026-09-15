@@ -2657,18 +2657,87 @@ def _rate_lead_quality(info: dict) -> str:
     return "C"
 
 
+_BAD_SITE_MARKS = ("duckduckgo.com", "duck.com", "google.com/search", "bing.com/search",
+                   "facebook.com/search", "amazon.com/s", "youtube.com/results")
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+
+def _lead_val(lead_info: dict, *keys) -> str:
+    """从线索字典里按多个候选 key（英文/中文）取第一个非空值。"""
+    for k in keys:
+        v = lead_info.get(k)
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s:
+            return s
+    return ""
+
+
+def _real_website(url: str) -> bool:
+    """判定官网是否为真实企业站点（过滤搜索引擎/聚合页假网址）。"""
+    if not url:
+        return False
+    u = url.strip().lower()
+    if not (u.startswith("http://") or u.startswith("https://") or u.startswith("www.")):
+        return False
+    return not any(m in u for m in _BAD_SITE_MARKS)
+
+
+def _real_email(val: str) -> bool:
+    """判定是否存在真实可用的邮箱地址（含@与域名，且不是示例/占位）。"""
+    if not val:
+        return False
+    m = _EMAIL_RE.search(val)
+    if not m:
+        return False
+    addr = m.group(0).lower()
+    local, _, domain = addr.partition("@")
+    if not local or domain in ("example.com", "domain.com", "email.com", "xxx.com"):
+        return False
+    if domain.endswith((".png", ".jpg", ".jpeg", ".gif")):
+        return False
+    return True
+
+
+def _lead_is_reachable(lead_info: dict) -> bool:
+    """可达性硬门槛：有真实邮箱 / 官网 / 决策人 / LinkedIn 任一即视为可触达。"""
+    if _real_email(_lead_val(lead_info, "email_pattern", "邮箱格式", "联系邮箱", "email")):
+        return True
+    if _real_website(_lead_val(lead_info, "website", "官网", "原文链接")):
+        return True
+    if _lead_val(lead_info, "decision_maker", "决策人"):
+        return True
+    if _lead_val(lead_info, "linkedin", "LinkedIn"):
+        return True
+    return False
+
+
+def _apply_score_gate(score, lead_info: dict) -> int:
+    """评分出口闸门：无法触达的线索一律压到50分以下（封顶45）。"""
+    try:
+        s = int(float(score))
+    except (TypeError, ValueError):
+        s = 30
+    s = max(0, min(100, s))
+    if not _lead_is_reachable(lead_info):
+        s = min(s, 45)
+    return s
+
+
 def _rule_fallback_score(lead_info: dict) -> int:
-    """规则兜底打分：Coze工作流不可用时使用。A=90/B=60/C=30 + 补搜信息加分"""
-    grade = lead_info.get("confidence", "C")
+    """规则兜底打分：Coze工作流不可用时使用。A=90/B=60/C=30 + 补搜信息加分；
+    出口同样经过可达性闸门（无法触达封顶45）。"""
+    grade = _lead_val(lead_info, "confidence", "评级") or "C"
     base_score = {"A": 90, "B": 60, "C": 30}.get(grade, 30)
     bonus = 0
-    if lead_info.get("website") and not str(lead_info["website"]).startswith("https://html.duckduckgo.com"):
+    if _real_website(_lead_val(lead_info, "website", "官网", "原文链接")):
         bonus += 5
-    if lead_info.get("industry"):
+    if _lead_val(lead_info, "industry", "行业"):
         bonus += 3
-    if lead_info.get("email_pattern"):
+    if _real_email(_lead_val(lead_info, "email_pattern", "邮箱格式", "联系邮箱", "email")):
         bonus += 5
-    return min(100, base_score + bonus)
+    return _apply_score_gate(min(100, base_score + bonus), lead_info)
 
 
 def _get_sales_coze_pat() -> str:
@@ -2742,21 +2811,48 @@ def _extract_scoring_payload(data: dict) -> dict:
 
 async def call_coze_scoring_workflow(lead_info: dict) -> int:
     """调用Coze Lead_Score工作流AI打分，返回0-100整数。
+    - 入参兼容英文/中文字段名；
+    - 打分前清洗脏公司名（搜索词短语），且脏名不向 product 白嫖关键词；
+    - 出口经过可达性闸门：无邮箱/官网/决策人/LinkedIn 的线索封顶45；
     工作流不可用/解析失败/超时 → 规则兜底，保证主流程不中断。"""
     wf_id = (getattr(settings, "COZE_LEAD_SCORE_WORKFLOW_ID", None)
              or getattr(settings, "coze_lead_score_workflow_id", "") or "")
     pat = (_get_sales_coze_pat()
            or getattr(settings, "COZE_PAT", "") or getattr(settings, "coze_pat", "") or "")
+
+    raw_company = _lead_val(lead_info, "company_name", "公司/机构", "公司名")
+    clean_company = _clean_company_name(raw_company)
+    country = _lead_val(lead_info, "country", "国家", "地区")
+    raw_product = _lead_val(lead_info, "product", "需求产品", "推荐产品")
+    industry = _lead_val(lead_info, "industry", "行业")
+    website = _lead_val(lead_info, "website", "官网", "原文链接")
+    email_pattern = _lead_val(lead_info, "email_pattern", "邮箱格式", "联系邮箱", "email")
+    grade = _lead_val(lead_info, "confidence", "评级") or "C"
+
+    # 脏公司名：若产品词直接来自该垃圾短语，不可让它白嫖"产品契合度"
+    product = raw_product
+    if not clean_company and raw_company:
+        if not product or product.lower() in raw_company.lower():
+            product = ""
+
+    norm = {
+        "company_name": clean_company, "country": country, "product": product,
+        "industry": industry, "website": website, "email_pattern": email_pattern,
+        "confidence": grade,
+        "decision_maker": _lead_val(lead_info, "decision_maker", "决策人"),
+        "linkedin": _lead_val(lead_info, "linkedin", "LinkedIn"),
+    }
+
     if not pat or not wf_id:
-        return _rule_fallback_score(lead_info)
+        return _rule_fallback_score(norm)
     parameters = {
-        "company_name": str(lead_info.get("company_name", "") or ""),
-        "country": str(lead_info.get("country", "") or ""),
-        "product": str(lead_info.get("product") or lead_info.get("需求产品", "") or ""),
-        "industry": str(lead_info.get("industry", "") or ""),
-        "website": str(lead_info.get("website", "") or ""),
-        "email_pattern": str(lead_info.get("email_pattern", "") or ""),
-        "grade": str(lead_info.get("confidence", "C") or "C"),
+        "company_name": clean_company,
+        "country": country,
+        "product": product,
+        "industry": industry,
+        "website": website,
+        "email_pattern": email_pattern,
+        "grade": grade,
     }
     try:
         data = await asyncio.wait_for(
@@ -2766,14 +2862,14 @@ async def call_coze_scoring_workflow(lead_info: dict) -> int:
         score = parsed.get("total_score")
         score = int(float(score))
         if 0 <= score <= 100:
-            return score
-        return _rule_fallback_score(lead_info)
+            return _apply_score_gate(score, norm)
+        return _rule_fallback_score(norm)
     except asyncio.TimeoutError:
-        print(f"[score] Coze打分超时，规则兜底: {lead_info.get('company_name')}")
-        return _rule_fallback_score(lead_info)
+        print(f"[score] Coze打分超时，规则兜底: {clean_company or raw_company}")
+        return _rule_fallback_score(norm)
     except Exception as e:
-        print(f"[score] Coze打分失败({e})，规则兜底: {lead_info.get('company_name')}")
-        return _rule_fallback_score(lead_info)
+        print(f"[score] Coze打分失败({e})，规则兜底: {clean_company or raw_company}")
+        return _rule_fallback_score(norm)
 
 
 # ============================================================
@@ -4198,6 +4294,81 @@ async def api_leads_claim_by_record(record_id: str, req: ClaimByRecordRequest, r
     except Exception as e:
         print(f"[leads] 认领失败（{record_id}）: {e}")
         return JSONResponse({"ok": False, "message": f"认领失败：{e}"}, status_code=502)
+
+
+class ReleaseByRecordRequest(BaseModel):
+    releaser: str = ""
+
+
+@app.post("/api/leads/release/{record_id}")
+async def api_leads_release_by_record(record_id: str, req: ReleaseByRecordRequest, request: Request):
+    """释放已认领线索，退回公海池。仅当前认领人本人可释放；跟进状态与开发信历史保留。需JWT认证。"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info:
+        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    releaser = (req.releaser or "").strip()
+    if not releaser:
+        releaser = (request.headers.get("X-Sales-Id", "").strip()
+                    or user_info.get("name", "") or user_info.get("username", ""))
+    try:
+        tid = _ensure_leads_table()
+        resp = _feishu_api("GET", f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records/{record_id}")
+        rec = resp.get("data", {}).get("record", {})
+        fields = rec.get("fields", {})
+        current_status = _tv(fields.get("认领状态"))
+        current_claimer = _tv(fields.get("认领人"))
+        if current_status != "已认领" or not current_claimer:
+            return JSONResponse({"ok": False, "message": "该线索当前未被认领，无需释放"}, status_code=400)
+        if releaser and current_claimer.strip() != releaser:
+            return JSONResponse({"ok": False, "message": f"仅认领人（{current_claimer}）可释放该客户"}, status_code=403)
+        # 释放：清空认领状态/认领人/认领时间；跟进状态、发件历史、评分等全部保留
+        _feishu_api(
+            "PUT",
+            f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records/{record_id}",
+            {"fields": {"认领状态": "未认领", "认领人": "", "认领时间": ""}})
+        _invalidate_leads_cache()
+        return {"ok": True, "message": "已释放回公海池"}
+    except Exception as e:
+        print(f"[leads] 释放失败（{record_id}）: {e}")
+        return JSONResponse({"ok": False, "message": f"释放失败：{e}"}, status_code=502)
+
+
+@app.post("/api/leads/rescore-all")
+async def api_leads_rescore_all(request: Request):
+    """对线索表全量记录用最新打分逻辑（含可达性闸门+脏名清洗）重新AI评分并回写。需JWT认证。
+    逐条调用，失败的记录跳过并计入 failed，不因单条异常中断整体。"""
+    token = _get_token_from_request(request)
+    if not token or not _verify_token(token):
+        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    try:
+        leads = _fetch_leads(force_refresh=True)
+    except Exception as e:
+        return JSONResponse({"ok": False, "message": f"读取线索失败：{e}"}, status_code=502)
+    updated, failed, capped = 0, 0, 0
+    results = []
+    for ld in leads:
+        rid = ld.get("record_id", "")
+        if not rid:
+            failed += 1
+            continue
+        name = ld.get("公司/机构", "") or ld.get("线索标题", "")
+        try:
+            old_score = ld.get("综合评分", "")
+            new_score = await call_coze_scoring_workflow(ld)
+            _update_leads_record(rid, {"综合评分": new_score})
+            updated += 1
+            if new_score < 50:
+                capped += 1
+            results.append({"record_id": rid, "company": name,
+                            "old": old_score, "new": new_score})
+            await asyncio.sleep(0.3)  # 降低Coze/飞书接口压力
+        except Exception as e:
+            failed += 1
+            print(f"[rescore] 重评失败（{rid} {name}）: {e}")
+    _invalidate_leads_cache()
+    return {"ok": True, "total": len(leads), "updated": updated,
+            "failed": failed, "capped_below_50": capped, "results": results}
 
 
 class EnrichLeadRequest(BaseModel):
