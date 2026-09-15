@@ -4971,8 +4971,51 @@ async def api_admin_cleanup_fake_leads(request: Request):
     if mode == "scan":
         return {"ok": True, "mode": "scan", "count": len(candidates), "candidates": candidates,
                 "total_leads": len(leads)}
+    if mode == "smtp_probe":
+        # 临时SMTP自检：在Railway出口直连腾讯企业邮，区分"出口被封"与"业务逻辑"问题
+        import smtplib as _sm
+        host = _settings_val("smtp_host", "smtp.exmail.qq.com")
+        try:
+            port = int(_settings_val("smtp_port", "465") or 465)
+        except Exception:
+            port = 465
+        su = _settings_val("smtp_user", "")
+        sp = _settings_val("smtp_password", "")
+        probe_to = (body.get("probe_to") or "").strip()
+        diag = {"host": host, "port": port, "user": su,
+                "user_set": bool(su), "password_set": bool(sp), "send_test": bool(probe_to)}
+        try:
+            if not su or not sp:
+                return {"ok": False, "stage": "config", "diag": diag,
+                        "error": "SMTP_USER/SMTP_PASSWORD 为空"}
+            if port == 465:
+                srv = _sm.SMTP_SSL(host, port, timeout=20)
+            else:
+                srv = _sm.SMTP(host, port, timeout=20)
+                srv.ehlo(); srv.starttls(); srv.ehlo()
+            srv.login(su, sp)
+            diag["login"] = "ok"
+            refused = {}
+            if probe_to:
+                from email.mime.text import MIMEText as _MT
+                from email.utils import formataddr as _fa
+                m = _MT("RHC Railway SMTP self-test, please ignore.", "plain", "utf-8")
+                m["From"] = _fa((_settings_val("smtp_from_name", "RHC Veterinary Medical"), su))
+                m["To"] = probe_to
+                m["Subject"] = "RHC Railway SMTP test"
+                refused = srv.sendmail(su, [probe_to], m.as_string())
+                diag["send"] = "ok" if not refused else f"refused:{refused}"
+            srv.quit()
+            return {"ok": True, "diag": diag}
+        except _sm.SMTPAuthenticationError as e:
+            diag["login"] = "auth_fail"
+            return {"ok": False, "stage": "login", "diag": diag,
+                    "error": f"{e.smtp_code} {e.smtp_error.decode('utf-8','ignore')}"}
+        except Exception as e:
+            return {"ok": False, "stage": "network_or_send", "diag": diag,
+                    "error": f"{type(e).__name__}: {e}"}
     if mode != "delete":
-        return JSONResponse({"ok": False, "message": "mode 必须为 scan 或 delete"}, status_code=400)
+        return JSONResponse({"ok": False, "message": "mode 必须为 scan / delete / smtp_probe"}, status_code=400)
     # 删除：只删 force_ids 内、且服务端复核确认为假（或未认领）的记录
     tid = _ensure_leads_table()
     deleted, skipped, backup = [], [], []
