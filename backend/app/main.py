@@ -2707,8 +2707,80 @@ def _parse_bing_html_results(html_text: str) -> list:
     return results
 
 
+def _brave_api_search(query: str, timeout: int = 8) -> list:
+    """Brave Search API（独立索引、机房IP不被封）。需环境变量 BRAVE_API_KEY。
+    返回 [{title, url, snippet}]；未配置 key 抛 RuntimeError 由上层回退。"""
+    import urllib.parse as _up
+    key = os.environ.get("BRAVE_API_KEY", "").strip()
+    if not key:
+        raise RuntimeError("BRAVE_API_KEY 未配置")
+    qs = _up.urlencode({"q": query, "count": 10, "country": "US", "safesearch": "off"})
+    url = "https://api.search.brave.com/res/v1/web/search?" + qs
+    code, body = _http_fetch(
+        url,
+        {"Accept": "application/json",
+         "X-Subscription-Token": key,
+         "User-Agent": _FIND_UA},
+        timeout, None)
+    if code != 200 or not body:
+        raise RuntimeError(f"Brave http{code}")
+    data = json.loads(body)
+    out = []
+    for it in (data.get("web", {}) or {}).get("results", []) or []:
+        u = (it.get("url") or "").strip()
+        t = (it.get("title") or "").strip()
+        if u and t:
+            out.append({"title": t, "url": u,
+                        "snippet": (it.get("description") or "")[:300]})
+    return out
+
+
+# 主动获客结果域名黑名单：B2B贸易目录/聚合站、社媒、电商、新闻、招聘等非企业官网。
+# 这些站点既不是可开发的买家，也产生 "Global ... trade data" 这类脏公司名。
+_JUNK_HOST_MARKS = (
+    # B2B / 贸易数据 / 黄页目录
+    "volza.com", "turkishexporter.net", "exportersindia.com", "tradeindia.com",
+    "indiamart.com", "go4worldbusiness.com", "alibaba.com", "made-in-china.com",
+    "globalsources.com", "tradekey.com", "importgenius.com", "panjiva.com",
+    "zauba.com", "52wmb.com", "seair.co.in", "exportgenius", "ec21.com",
+    "kompass.com", "europages.com", "thomasnet.com", "yellowpages", "yelp.com",
+    "dnb.com", "tridge.com", "coimex", "ambalaj", "customs.info", "exim.com",
+    "bizearch", "companylist", "hotfrog", "cylex", "brownbook", "findyello",
+    # 电商 / 零售平台
+    "amazon.", "ebay.", "etsy.com", "aliexpress.com", "walmart.com",
+    # 社媒 / 内容 / 论坛
+    "linkedin.com", "facebook.com", "instagram.com", "youtube.com", "youtu.be",
+    "twitter.com", "x.com", "tiktok.com", "pinterest.com", "reddit.com",
+    "quora.com", "medium.com", "wordpress.com", "blogspot.com", "tumblr.com",
+    "wikipedia.org", "wikidata.org", "glassdoor", "indeed.com", "naukri.com",
+    "jobstreet", "glassdoor", "trustpilot.com", "crunchbase.com", "bloomberg.com",
+    "reuters.com", "prnewswire.com", "businesswire.com", "wsj.com", "ft.com",
+    "forbes.com", "marketresearch", "grandviewresearch", "fortunebusinessinsights",
+    # 搜索引擎自身
+    "duckduckgo.com", "bing.com", "google.com", "google.", "yahoo.com", "mojeek.com",
+)
+
+
+def _is_junk_result_url(url: str) -> bool:
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(url).netloc.lower()
+    except Exception:
+        return True
+    if not host:
+        return True
+    return any(mark in host for mark in _JUNK_HOST_MARKS)
+
+
+def _filter_junk_results(results: list):
+    """剔除聚合站/社媒结果，返回 (干净结果, 被过滤数)。"""
+    clean = [r for r in results if not _is_junk_result_url(r.get("url", ""))]
+    return clean, len(results) - len(clean)
+
+
 def _multi_engine_search(query: str, timeout: int = 6) -> list:
-    """主动获客单查询：DDG GET → DDG POST → Bing 依次兜底，命中即返回；
+    """主动获客单查询：有 BRAVE_API_KEY 优先 Brave；否则/失败再回退
+    DDG GET → DDG POST → Bing。每个引擎结果先过滤聚合站，干净结果命中即返回；
     每个引擎真实状态写入 _lead_search_diag，避免静默吞错导致"假无线索"。"""
     import urllib.parse as _up
     base_headers = {
@@ -2717,30 +2789,40 @@ def _multi_engine_search(query: str, timeout: int = 6) -> list:
         "Accept-Language": "en-US,en;q=0.9",
     }
     q = _up.urlencode({"q": query})
-    engines = [
+    engines = []
+    if os.environ.get("BRAVE_API_KEY", "").strip():
+        engines.append(("brave", None, None, None, _brave_api_search, True))
+    engines += [
         ("ddg_get", "https://html.duckduckgo.com/html/?" + q,
-         dict(base_headers), None, _parse_ddg_html_results),
+         dict(base_headers), None, _parse_ddg_html_results, False),
         ("ddg_post", "https://html.duckduckgo.com/html/",
          {**base_headers, "Content-Type": "application/x-www-form-urlencoded",
-          "Referer": "https://html.duckduckgo.com/"}, q, _parse_ddg_html_results),
+          "Referer": "https://html.duckduckgo.com/"}, q, _parse_ddg_html_results, False),
         ("bing", "https://www.bing.com/search?" + _up.urlencode({"q": query, "count": "20"}),
-         dict(base_headers), None, _parse_bing_html_results),
+         dict(base_headers), None, _parse_bing_html_results, False),
     ]
-    for name, url, headers, data, parser in engines:
+    for name, url, headers, data, parser, is_brave in engines:
         try:
-            code, body = _http_fetch(url, headers, timeout, data)
-            if not body:
-                _lead_search_diag["engine_status"][name] = f"空响应(http{code})"
-                continue
-            low_head = body[:4000].lower()
-            if "anomaly" in low_head or ("challenge" in low_head and name.startswith("ddg")):
-                _lead_search_diag["engine_status"][name] = f"被限流/验证页(http{code})"
-                continue
-            results = parser(body)
-            _lead_search_diag["engine_status"][name] = f"http{code}/解析{len(results)}条"
-            if results:
+            if is_brave:
+                raw = _brave_api_search(query, timeout)
+                code_note = "api"
+            else:
+                code, body = _http_fetch(url, headers, timeout, data)
+                code_note = f"http{code}"
+                if not body:
+                    _lead_search_diag["engine_status"][name] = f"空响应({code_note})"
+                    continue
+                low_head = body[:4000].lower()
+                if "anomaly" in low_head or ("challenge" in low_head and name.startswith("ddg")):
+                    _lead_search_diag["engine_status"][name] = f"被限流/验证页({code_note})"
+                    continue
+                raw = parser(body)
+            clean, junk_n = _filter_junk_results(raw)
+            _lead_search_diag["engine_status"][name] = (
+                f"{code_note}/原始{len(raw)}/过滤聚合{junk_n}/有效{len(clean)}")
+            if clean:
                 _lead_search_diag["last_ok_engine"] = name
-                return results
+                return clean
         except Exception as e:
             _lead_search_diag["engine_status"][name] = type(e).__name__
             continue
@@ -3376,10 +3458,13 @@ def _run_lead_search(max_results: int = 30) -> list:
     all_raw = []  # [{title, url, snippet}]
     seen_urls = set()
     empty_rounds = 0  # 连续空结果轮次，用于判断是否被搜索引擎限流
-    # 限制搜索轮次，避免超时
-    max_queries = min(len(queries), 20)
+    # 控制搜索轮次与节奏：Brave 免费档 1 QPS，轮次太多既慢又耗额度；
+    # 免费回退(DDG)在机房第2个查询起即被限流，多发也无意义。
+    use_brave = bool(os.environ.get("BRAVE_API_KEY", "").strip())
+    max_queries = min(len(queries), 10 if use_brave else 8)
+    gap = 1.1 if use_brave else 0.5
     for i, query in enumerate(queries[:max_queries]):
-        results = _search_ddg_leads(query, timeout=6)
+        results = _search_ddg_leads(query, timeout=8 if use_brave else 6)
         if not results:
             empty_rounds += 1
         else:
@@ -3392,9 +3477,12 @@ def _run_lead_search(max_results: int = 30) -> list:
                 all_raw.append(r)
         if len(all_raw) >= max_results * 2:
             break
-        # 每轮搜索间隔，避免被封
-        if i > 0 and i % 5 == 0:
-            time.sleep(0.5)
+        # 连续多轮零结果（被限流）就提前收工，不浪费时间/额度
+        if empty_rounds >= 5:
+            break
+        # 轮次间隔：Brave 遵守 1 QPS；免费引擎降低被封概率
+        if i < max_queries - 1:
+            time.sleep(gap)
 
     # 提取公司信息
     leads = []
@@ -3486,8 +3574,8 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
                 "cached": True}
 
     try:
-        # 1) 执行基础搜索
-        raw_leads = _run_lead_search(max_results=max_results)
+        # 1) 执行基础搜索（同步抓取放到线程池，避免阻塞事件循环）
+        raw_leads = await asyncio.to_thread(_run_lead_search, max_results)
         search_diag = getattr(raw_leads, "_search_diag", None) or {}
 
         # 2) 与已有线索去重
@@ -3627,92 +3715,6 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
     except Exception as e:
         print(f"[search] 主动搜索失败: {e}")
         return JSONResponse({"ok": False, "message": f"搜索失败：{e}"}, status_code=502)
-
-
-@app.get("/api/debug/search-probe")
-async def api_debug_search_probe(request: Request, key: str = "", q: str = "",
-                                 mode: str = "single", n: int = 6):
-    """【临时排障】从服务器侧真实探测搜索引擎。
-    mode=single：单查询三引擎；mode=seq：按真实搜索词连发n个，验证限流与聚合站占比。
-    需 ?key= 与 RHC_DEBUG_KEY 一致（兜底固定串）。定位后删除。"""
-    import urllib.parse as _up
-    import time as _time
-    expected = os.environ.get("RHC_DEBUG_KEY", "") or "rhc-probe-2026"
-    if key != expected:
-        return JSONResponse({"ok": False, "message": "forbidden"}, status_code=403)
-
-    def _probe_one(query):
-        import urllib.parse as _up2
-        base_headers = {"User-Agent": _FIND_UA,
-                        "Accept": "text/html,application/xhtml+xml",
-                        "Accept-Language": "en-US,en;q=0.9"}
-        qenc = _up.urlencode({"q": query})
-        engines = [
-            ("ddg_get", "https://html.duckduckgo.com/html/?" + qenc, dict(base_headers),
-             None, _parse_ddg_html_results, "result__a"),
-            ("ddg_post", "https://html.duckduckgo.com/html/",
-             {**base_headers, "Content-Type": "application/x-www-form-urlencoded",
-              "Referer": "https://html.duckduckgo.com/"}, qenc, _parse_ddg_html_results, "result__a"),
-            ("bing", "https://www.bing.com/search?" + _up2.urlencode({"q": query, "count": "20"}),
-             dict(base_headers), None, _parse_bing_html_results, "b_algo"),
-            ("mojeek", "https://www.mojeek.com/search?" + _up2.urlencode({"q": query}),
-             dict(base_headers), None, None, "results-standard"),
-        ]
-        rec = {}
-        for name, url, headers, data, parser, marker in engines:
-            e = {}
-            try:
-                code, body = _http_fetch(url, headers, 8, data)
-                e["http"] = code
-                e["len"] = len(body or "")
-                e["marker"] = (body or "").count(marker)
-                low = (body or "")[:5000].lower()
-                e["blocked"] = any(w in low for w in ("anomaly", "challenge", "captcha",
-                                                      "unusual traffic", "cf-browser-verification"))
-                if parser:
-                    try:
-                        parsed = parser(body)
-                        e["parsed"] = len(parsed)
-                        e["hosts"] = [_up.urlparse(p["url"]).netloc for p in parsed[:8]]
-                    except Exception as pe:
-                        e["parse_error"] = type(pe).__name__
-            except Exception as ex:
-                e["fetch_error"] = type(ex).__name__
-            rec[name] = e
-        return rec
-
-    if mode != "seq":
-        query = q.strip() or '"veterinary anesthesia machine" importer Brazil'
-        return JSONResponse({"ok": True, "mode": "single", "query": query,
-                             "engines": _probe_one(query)})
-
-    queries = _build_search_queries()[:max(1, min(n, 20))]
-    seq = []
-    t0 = _time.time()
-    for i, query in enumerate(queries):
-        r = _probe_one(query)
-        row = {"i": i, "q": query}
-        for eng in ("ddg_get", "ddg_post", "bing", "mojeek"):
-            er = r.get(eng, {})
-            row[eng] = {"p": er.get("parsed"), "m": er.get("marker"),
-                        "b": er.get("blocked"), "h": er.get("http")}
-        row["hosts"] = ((r["ddg_get"].get("hosts") or r["ddg_post"].get("hosts") or [])[:6])
-        seq.append(row)
-        if i < len(queries) - 1:
-            _time.sleep(1.2)
-    # 附一份 Bing 首页原始结构样本，便于修正解析器
-    try:
-        bh = {"User-Agent": _FIND_UA, "Accept-Language": "en-US,en;q=0.9"}
-        _, bbody = _http_fetch(
-            "https://www.bing.com/search?" + _up.urlencode({"q": queries[0], "count": "20"}),
-            bh, 8)
-        mm = re.search(r'<li class="b_algo".{0,1200}', bbody or "", re.S)
-        bing_sample = re.sub(r"\s+", " ", mm.group(0))[:900] if mm else "(no b_algo) " + re.sub(r"\s+", " ", (bbody or "")[:300])
-    except Exception as e:
-        bing_sample = f"err {e}"
-    return JSONResponse({"ok": True, "mode": "seq", "count": len(seq),
-                         "elapsed_sec": round(_time.time() - t0, 1),
-                         "bing_sample": bing_sample, "seq": seq})
 
 
 # ============================================================
@@ -4713,7 +4715,7 @@ async def _scheduled_leads_search():
     """定时任务：每天9:00/15:00自动搜索线索并写入公海池，后台启动补搜"""
     print(f"[scheduler] 定时搜索开始: {datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')}")
     try:
-        raw_leads = _run_lead_search(max_results=30)
+        raw_leads = await asyncio.to_thread(_run_lead_search, 30)
         try:
             existing_leads = _fetch_leads(force_refresh=True)
         except Exception:
