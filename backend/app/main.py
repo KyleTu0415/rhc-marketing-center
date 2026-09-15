@@ -3630,48 +3630,67 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
 
 
 @app.get("/api/debug/search-probe")
-async def api_debug_search_probe(request: Request, key: str = "", q: str = ""):
-    """【临时排障】从服务器侧真实探测三个搜索引擎的可达性与解析结果。
-    需 ?key= 与 RHC_DEBUG_KEY 一致（兜底固定串）。定位主动获客为空根因后删除。"""
+async def api_debug_search_probe(request: Request, key: str = "", q: str = "",
+                                 mode: str = "single", n: int = 6):
+    """【临时排障】从服务器侧真实探测搜索引擎。
+    mode=single：单查询三引擎；mode=seq：按真实搜索词连发n个，验证限流与聚合站占比。
+    需 ?key= 与 RHC_DEBUG_KEY 一致（兜底固定串）。定位后删除。"""
     import urllib.parse as _up
+    import time as _time
     expected = os.environ.get("RHC_DEBUG_KEY", "") or "rhc-probe-2026"
     if key != expected:
         return JSONResponse({"ok": False, "message": "forbidden"}, status_code=403)
-    query = q.strip() or '"veterinary anesthesia machine" importer Brazil'
-    base_headers = {"User-Agent": _FIND_UA,
-                    "Accept": "text/html,application/xhtml+xml",
-                    "Accept-Language": "en-US,en;q=0.9"}
-    qenc = _up.urlencode({"q": query})
-    engines = [
-        ("ddg_get", "https://html.duckduckgo.com/html/?" + qenc, dict(base_headers),
-         None, _parse_ddg_html_results),
-        ("ddg_post", "https://html.duckduckgo.com/html/",
-         {**base_headers, "Content-Type": "application/x-www-form-urlencoded",
-          "Referer": "https://html.duckduckgo.com/"}, qenc, _parse_ddg_html_results),
-        ("bing", "https://www.bing.com/search?" + _up.urlencode({"q": query, "count": "20"}),
-         dict(base_headers), None, _parse_bing_html_results),
-    ]
-    out = {"ok": True, "query": query, "engines": {}}
-    for name, url, headers, data, parser in engines:
+
+    def _probe_one(query):
+        base_headers = {"User-Agent": _FIND_UA,
+                        "Accept": "text/html,application/xhtml+xml",
+                        "Accept-Language": "en-US,en;q=0.9"}
+        qenc = _up.urlencode({"q": query})
+        engines = [
+            ("ddg_get", "https://html.duckduckgo.com/html/?" + qenc, dict(base_headers),
+             None, _parse_ddg_html_results),
+            ("ddg_post", "https://html.duckduckgo.com/html/",
+             {**base_headers, "Content-Type": "application/x-www-form-urlencoded",
+              "Referer": "https://html.duckduckgo.com/"}, qenc, _parse_ddg_html_results),
+        ]
         rec = {}
-        try:
-            code, body = _http_fetch(url, headers, 10, data)
-            rec["http"] = code
-            rec["body_len"] = len(body or "")
-            low = (body or "")[:5000].lower()
-            rec["flags"] = [w for w in ("anomaly", "challenge", "captcha", "unusual traffic",
-                                        "enable javascript") if w in low]
+        for name, url, headers, data, parser in engines:
+            e = {}
             try:
-                parsed = parser(body)
-                rec["parsed"] = len(parsed)
-                rec["sample"] = [{"t": p["title"][:60], "u": p["url"][:100]} for p in parsed[:3]]
-            except Exception as pe:
-                rec["parse_error"] = f"{type(pe).__name__}: {pe}"
-            rec["head"] = re.sub(r"\s+", " ", (body or "")[:180])
-        except Exception as e:
-            rec["fetch_error"] = f"{type(e).__name__}: {e}"
-        out["engines"][name] = rec
-    return JSONResponse(out)
+                code, body = _http_fetch(url, headers, 8, data)
+                e["http"] = code
+                e["len"] = len(body or "")
+                low = (body or "")[:5000].lower()
+                e["blocked"] = any(w in low for w in ("anomaly", "challenge", "captcha", "unusual traffic"))
+                try:
+                    parsed = parser(body)
+                    e["parsed"] = len(parsed)
+                    e["hosts"] = [_up.urlparse(p["url"]).netloc for p in parsed[:8]]
+                except Exception as pe:
+                    e["parse_error"] = type(pe).__name__
+            except Exception as ex:
+                e["fetch_error"] = type(ex).__name__
+            rec[name] = e
+        return rec
+
+    if mode != "seq":
+        query = q.strip() or '"veterinary anesthesia machine" importer Brazil'
+        return JSONResponse({"ok": True, "mode": "single", "query": query,
+                             "engines": _probe_one(query)})
+
+    queries = _build_search_queries()[:max(1, min(n, 20))]
+    seq = []
+    t0 = _time.time()
+    for i, query in enumerate(queries):
+        r = _probe_one(query)
+        seq.append({"i": i, "q": query,
+                    "get": r["ddg_get"].get("parsed"), "get_blocked": r["ddg_get"].get("blocked"),
+                    "post": r["ddg_post"].get("parsed"), "post_blocked": r["ddg_post"].get("blocked"),
+                    "hosts": (r["ddg_get"].get("hosts") or r["ddg_post"].get("hosts") or [])[:6]})
+        if i < len(queries) - 1:
+            _time.sleep(1.2)  # 与真实搜索相近的节奏
+    return JSONResponse({"ok": True, "mode": "seq", "count": len(seq),
+                         "elapsed_sec": round(_time.time() - t0, 1), "seq": seq})
 
 
 # ============================================================
