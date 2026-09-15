@@ -915,6 +915,35 @@ async def _migrate_legacy_scores():
     print(f"[score-migrate] 历史评分迁移完成，共校正 {fixed} 条不可触达线索")
 
 
+async def _reset_stuck_enrichment():
+    """启动时复位因部署/重启被杀掉的在途补搜任务。
+    线上线程在 轻补搜中/深度补搜中 被中断后，状态会永久滞留导致前端转圈。
+    重启即代表没有任何在途任务，故把滞留的"补搜中"统一复位为"未补搜"，允许重试。幂等。"""
+    await asyncio.sleep(15)  # 等飞书表预热完成
+    try:
+        leads = _fetch_leads(force_refresh=True)
+    except Exception as e:
+        print(f"[enrich-reset] 读取线索失败，跳过复位: {e}")
+        return
+    stuck_states = {"轻补搜中", "深度补搜中"}
+    reset = 0
+    for ld in leads:
+        rid = ld.get("record_id", "")
+        status = (str(ld.get("补搜状态") or "")).strip()
+        if not rid or status not in stuck_states:
+            continue
+        try:
+            _update_leads_record(rid, {"补搜状态": "未补搜"})
+            reset += 1
+            print(f"[enrich-reset] 复位卡死补全：{ld.get('公司/机构','')}（{status} -> 未补搜）")
+            await asyncio.sleep(0.2)
+        except Exception as e:
+            print(f"[enrich-reset] 单条复位失败（{rid}）: {e}")
+    if reset:
+        _invalidate_leads_cache()
+    print(f"[enrich-reset] 补全状态复位完成，共复位 {reset} 条卡死线索")
+
+
 def _norm_lead_record(rec: dict) -> dict:
     """飞书记录 -> 归一化字段（英文短 key 供前端使用，另附 record_id）。"""
     fl = rec.get("fields", {})
@@ -4316,15 +4345,27 @@ async def api_leads_my(request: Request):
     user_info = _verify_token(token) if token else None
     if not user_info:
         return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
-    # 优先从请求头取销售ID，其次从JWT
-    sales_id = request.headers.get("X-Sales-Id", "").strip()
-    if not sales_id:
-        sales_id = user_info.get("name", "") or user_info.get("username", "")
-    if not sales_id:
+    # 身份候选：优先前端当前认领身份(X-Sales-Id)，其次JWT姓名/账号；
+    # 归一化（去空白+忽略大小写）后任一命中即视为本人，兼容手输名与登录名差异
+    def _norm_name(s):
+        return "".join(str(s or "").split()).casefold()
+
+    candidates = []
+    header_sales = request.headers.get("X-Sales-Id", "").strip()
+    if header_sales:
+        candidates.append(header_sales)
+    for _k in ("name", "username"):
+        _v = (user_info.get(_k) or "").strip()
+        if _v:
+            candidates.append(_v)
+    norm_candidates = [_norm_name(c) for c in candidates if _norm_name(c)]
+    if not norm_candidates:
         return {"ok": True, "items": [], "stats": {"total": 0}}
     try:
         leads = _fetch_leads(force_refresh=True)
-        my_leads = [l for l in leads if (l.get("认领人") or "").strip() == sales_id and l.get("认领状态") == "已认领"]
+        my_leads = [l for l in leads
+                    if l.get("认领状态") == "已认领"
+                    and _norm_name(l.get("认领人")) in norm_candidates]
         my_leads.sort(key=lambda x: x.get("认领时间", ""), reverse=True)
         return {"ok": True, "items": my_leads, "stats": {"total": len(my_leads)}}
     except Exception as e:
@@ -4546,6 +4587,11 @@ async def startup_scheduler():
         asyncio.create_task(_migrate_legacy_scores())
     except Exception as e:
         print(f"[score-migrate] 迁移任务启动失败: {e}")
+    # 启动后复位因部署被杀掉而卡在"补搜中"的线索（幂等）
+    try:
+        asyncio.create_task(_reset_stuck_enrichment())
+    except Exception as e:
+        print(f"[enrich-reset] 复位任务启动失败: {e}")
 
 
 # 启动时后台预热飞书「系统账号」表（建表+种子数据），不阻塞服务启动

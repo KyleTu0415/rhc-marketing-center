@@ -3077,7 +3077,14 @@ function startEnrichmentPolling(){
     return s==='未补搜'||s==='轻补搜中'||s==='深度补搜中'||s==='';
   });
   if(!hasPending)return;
+  var pollStartedAt=Date.now();
+  var POLL_MAX_MS=180000; // 单次轮询最多3分钟，防止个别线索卡死导致永久转圈/无限请求
   publicPoolPollTimer=setInterval(function(){
+    if(Date.now()-pollStartedAt>POLL_MAX_MS){
+      clearInterval(publicPoolPollTimer);
+      loadPublicPool(true); // 最后强制拉一次最新状态（后端会复位真正卡死的记录）
+      return;
+    }
     fetch('/api/leads/public',{headers:authHeaders(),cache:'no-store'})
       .then(function(r){
         if(!r.ok)throw new Error('HTTP '+r.status);
@@ -3156,7 +3163,10 @@ function loadMyCustomers(forceRefresh){
   }
   if(el)el.innerHTML='<div class="loading-state"><div class="spin"></div><div>正在加载我的客户…</div></div>';
   if(stats)stats.textContent='加载中…';
-  fetch('/api/leads/my',{headers:authHeaders(),cache:'no-store'})
+  var myReqHeaders=authHeaders();
+  var mySalesName=getClaimerName();
+  if(mySalesName)myReqHeaders['X-Sales-Id']=mySalesName;
+  fetch('/api/leads/my',{headers:myReqHeaders,cache:'no-store'})
     .then(function(r){
       if(r.status===401)throw new Error('UNAUTHORIZED');
       if(!r.ok)throw new Error('HTTP '+r.status);
