@@ -84,8 +84,15 @@ except ImportError:
     class Settings:
         coze_pat: str = os.getenv("COZE_PAT", "")
         coze_workflow_id: str = os.getenv("COZE_WORKFLOW_ID", "")
+        coze_lead_score_workflow_id: str = os.getenv("COZE_LEAD_SCORE_WORKFLOW_ID", "7685777171490930688")
+        coze_email_workflow_id: str = os.getenv("COZE_EMAIL_WORKFLOW_ID", "")
         openai_base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
         openai_text_model: str = os.getenv("OPENAI_TEXT_MODEL", "deepseek-chat")
+        smtp_host: str = os.getenv("SMTP_HOST", "smtp.exmail.qq.com")
+        smtp_port: int = int(os.getenv("SMTP_PORT", "465"))
+        smtp_user: str = os.getenv("SMTP_USER", "ellachen@rhcmed.com")
+        smtp_password: str = os.getenv("SMTP_PASSWORD", "h4zJZ47A688cW6t9")
+        smtp_from_name: str = os.getenv("SMTP_FROM_NAME", "RHC Veterinary Medical")
     settings = Settings()
 
 app = FastAPI(title="RHC Marketing Assistant", version="1.0.0")
@@ -698,10 +705,16 @@ LEADS_FIELD_MAP = {
     "LinkedIn": "LinkedIn",
     "进口记录": "进口记录",
     "补搜状态": "补搜状态",
+    "跟进状态": "跟进状态",
+    "发件邮箱": "发件邮箱",
+    "最近发信时间": "最近发信时间",
+    "发信次数": "发信次数",
 }
 LEAD_ACTIVE_STATUS = ("跟进中", "已转客户")
 LEAD_STATUS_OPTIONS = ("跟进中", "已转客户", "已释放")
 LEAD_OPP_OPTIONS = ("诊所扩张", "招标采购", "展会机会", "渠道动态", "采购动态")
+# 线索开发信跟进状态（单选）；新线索前端按「待开发」兜底展示
+LEAD_FOLLOW_STATUS_OPTIONS = ("待开发", "开发信已发", "客户已回", "洽谈中", "已成交", "已搁置")
 
 _leads_table_id = None
 _leads_cache = {"data": None, "ts": 0.0}
@@ -754,6 +767,11 @@ def _ensure_leads_table():
              {"name": "已轻补"}, {"name": "深度补搜中"},
              {"name": "已深度补全"}, {"name": "补搜失败"}
          ]}},
+        {"field_name": "跟进状态", "type": 3,    # 单选（开发信跟进）
+         "property": {"options": [{"name": n} for n in LEAD_FOLLOW_STATUS_OPTIONS]}},
+        {"field_name": "发件邮箱", "type": 1},   # 文本（实际发件销售邮箱）
+        {"field_name": "最近发信时间", "type": 1},  # 文本
+        {"field_name": "发信次数", "type": 2},   # 数字
     ]
     resp = _feishu_api("POST", f"/bitable/v1/apps/{FEISHU_ATK}/tables",
                        {"table": {"name": LEADS_TABLE_NAME,
@@ -800,6 +818,11 @@ LEADS_FIELDS_SCHEMA = [
          {"name": "已轻补"}, {"name": "深度补搜中"},
          {"name": "已深度补全"}, {"name": "补搜失败"}
      ]}},
+    {"field_name": "跟进状态", "type": 3,
+     "property": {"options": [{"name": n} for n in LEAD_FOLLOW_STATUS_OPTIONS]}},
+    {"field_name": "发件邮箱", "type": 1},
+    {"field_name": "最近发信时间", "type": 1},
+    {"field_name": "发信次数", "type": 2},
 ]
 
 
@@ -2634,21 +2657,113 @@ def _rate_lead_quality(info: dict) -> str:
     return "C"
 
 
-async def call_coze_scoring_workflow(lead_info: dict) -> int:
-    """调用Coze工作流对线索进行多维度AI打分，返回0-100分
-    输入包含轻补搜后的丰富信息（官网/行业/邮箱等），打分更准确。
-    暂时用A/B/C规则+补搜信息兜底，待Coze工作流就绪后切换"""
+def _rule_fallback_score(lead_info: dict) -> int:
+    """规则兜底打分：Coze工作流不可用时使用。A=90/B=60/C=30 + 补搜信息加分"""
     grade = lead_info.get("confidence", "C")
     base_score = {"A": 90, "B": 60, "C": 30}.get(grade, 30)
-    # 轻补搜后信息加分：有官网+5，有行业+3，有邮箱格式+5
     bonus = 0
-    if lead_info.get("website") and not lead_info["website"].startswith("https://html.duckduckgo.com"):
+    if lead_info.get("website") and not str(lead_info["website"]).startswith("https://html.duckduckgo.com"):
         bonus += 5
     if lead_info.get("industry"):
         bonus += 3
     if lead_info.get("email_pattern"):
         bonus += 5
     return min(100, base_score + bonus)
+
+
+def _coze_workflow_run(workflow_id: str, parameters: dict, timeout: int = 60) -> dict:
+    """同步调用 Coze workflow/run，返回解析后的输出 dict。失败抛异常。
+    输出约定：工作流结束节点返回的字段会被组装进 data（JSON字符串）。"""
+    import urllib.request as _ur
+    pat = getattr(settings, "COZE_PAT", "") or getattr(settings, "coze_pat", "") or ""
+    if not pat or not workflow_id:
+        raise RuntimeError("COZE_PAT 或 workflow_id 未配置")
+    payload = {"workflow_id": workflow_id, "parameters": parameters}
+    req = _ur.Request(
+        "https://api.coze.cn/v1/workflow/run",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {pat}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        method="POST",
+    )
+    with _ur.urlopen(req, timeout=timeout) as resp:
+        result = json.loads(resp.read().decode("utf-8"))
+    if result.get("code") != 0:
+        raise RuntimeError(f"Coze workflow code={result.get('code')} msg={result.get('msg','')}")
+    data = result.get("data", {})
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            raise RuntimeError(f"Coze data 非JSON: {data[:200]}")
+    return data if isinstance(data, dict) else {}
+
+
+def _extract_scoring_payload(data: dict) -> dict:
+    """从工作流返回中提取 total_score/breakdown/recommendation。
+    兼容两种接线：(a)结束节点各字段已是独立值 (b)每个字段都装了整份JSON字符串。"""
+    def _maybe_load(v):
+        if isinstance(v, str):
+            s = v.strip()
+            if s.startswith("{"):
+                try:
+                    return json.loads(s)
+                except Exception:
+                    return None
+        return None
+
+    total = data.get("total_score")
+    # 情况b：total_score 是一整份 JSON 字符串
+    embedded = _maybe_load(total)
+    if embedded and ("total_score" in embedded):
+        return {
+            "total_score": embedded.get("total_score"),
+            "breakdown": embedded.get("breakdown", ""),
+            "recommendation": embedded.get("recommendation", ""),
+        }
+    # 情况a：字段已各归各位
+    return {
+        "total_score": total,
+        "breakdown": data.get("breakdown", ""),
+        "recommendation": data.get("recommendation", ""),
+    }
+
+
+async def call_coze_scoring_workflow(lead_info: dict) -> int:
+    """调用Coze Lead_Score工作流AI打分，返回0-100整数。
+    工作流不可用/解析失败/超时 → 规则兜底，保证主流程不中断。"""
+    wf_id = (getattr(settings, "COZE_LEAD_SCORE_WORKFLOW_ID", None)
+             or getattr(settings, "coze_lead_score_workflow_id", "") or "")
+    pat = getattr(settings, "COZE_PAT", "") or getattr(settings, "coze_pat", "") or ""
+    if not pat or not wf_id:
+        return _rule_fallback_score(lead_info)
+    parameters = {
+        "company_name": str(lead_info.get("company_name", "") or ""),
+        "country": str(lead_info.get("country", "") or ""),
+        "product": str(lead_info.get("product") or lead_info.get("需求产品", "") or ""),
+        "industry": str(lead_info.get("industry", "") or ""),
+        "website": str(lead_info.get("website", "") or ""),
+        "email_pattern": str(lead_info.get("email_pattern", "") or ""),
+        "grade": str(lead_info.get("confidence", "C") or "C"),
+    }
+    try:
+        data = await asyncio.wait_for(
+            asyncio.to_thread(_coze_workflow_run, wf_id, parameters, 60),
+            timeout=70)
+        parsed = _extract_scoring_payload(data)
+        score = parsed.get("total_score")
+        score = int(float(score))
+        if 0 <= score <= 100:
+            return score
+        return _rule_fallback_score(lead_info)
+    except asyncio.TimeoutError:
+        print(f"[score] Coze打分超时，规则兜底: {lead_info.get('company_name')}")
+        return _rule_fallback_score(lead_info)
+    except Exception as e:
+        print(f"[score] Coze打分失败({e})，规则兜底: {lead_info.get('company_name')}")
+        return _rule_fallback_score(lead_info)
 
 
 # ============================================================
@@ -3461,6 +3576,508 @@ async def api_messages_create(req: CreateMessageRequest, request: Request):
         return JSONResponse({"ok": False, "message": f"创建消息失败：{e}"}, status_code=502)
 
 # ============================================================
+# 开发信（冷邮件）：飞书「开发信记录」表 + SMTP 发信 + AI/模板生成
+# ============================================================
+EMAILS_TABLE_NAME = "开发信记录"
+EMAIL_STATUS_OPTIONS = ("成功", "失败")
+EMAIL_GEN_OPTIONS = ("AI", "模板")
+
+_emails_table_id = None
+
+
+def _settings_val(name: str, default=""):
+    """读取 settings 配置，兼容 config.py 大写字段名与 main.py 兜底 Settings 小写字段名。"""
+    v = getattr(settings, name, None)
+    if v in (None, ""):
+        v = getattr(settings, name.upper(), None)
+    return v if v not in (None, "") else default
+
+
+def _ensure_emails_table():
+    """确保多维表中存在「开发信记录」表，返回 table_id；不存在则自动创建。"""
+    global _emails_table_id
+    if _emails_table_id:
+        return _emails_table_id
+    if not FEISHU_ATK:
+        raise RuntimeError("FEISHU_APP_TOKEN 未配置")
+    resp = _feishu_api("GET", f"/bitable/v1/apps/{FEISHU_ATK}/tables?page_size=100")
+    for t in resp.get("data", {}).get("items", []):
+        if t.get("name") == EMAILS_TABLE_NAME:
+            _emails_table_id = t.get("table_id")
+            return _emails_table_id
+    fields = [
+        {"field_name": "客户公司", "type": 1},   # 文本（主字段）
+        {"field_name": "收件邮箱", "type": 1},   # 文本（逗号分隔多个）
+        {"field_name": "主题", "type": 1},       # 文本
+        {"field_name": "正文", "type": 1},       # 文本（长文本）
+        {"field_name": "发件人", "type": 1},     # 文本（实际发件邮箱/姓名+邮箱）
+        {"field_name": "发送状态", "type": 3,    # 单选
+         "property": {"options": [{"name": n} for n in EMAIL_STATUS_OPTIONS]}},
+        {"field_name": "发送时间", "type": 1},   # 文本（北京时间）
+        {"field_name": "线索record_id", "type": 1},  # 文本（关联商机线索记录）
+        {"field_name": "生成方式", "type": 3,    # 单选：AI/模板
+         "property": {"options": [{"name": n} for n in EMAIL_GEN_OPTIONS]}},
+    ]
+    resp = _feishu_api("POST", f"/bitable/v1/apps/{FEISHU_ATK}/tables",
+                       {"table": {"name": EMAILS_TABLE_NAME,
+                                  "default_view_name": "开发信列表",
+                                  "fields": fields}})
+    _emails_table_id = resp.get("data", {}).get("table_id")
+    if not _emails_table_id:
+        raise RuntimeError(f"创建「{EMAILS_TABLE_NAME}」表失败: {resp}")
+    print(f"[emails] 已创建飞书开发信记录表「{EMAILS_TABLE_NAME}」: {_emails_table_id}")
+    return _emails_table_id
+
+
+def _norm_email_record(rec: dict) -> dict:
+    """飞书开发信记录 -> 归一化英文字段（供前端使用，另附 record_id）。"""
+    fl = rec.get("fields", {})
+    return {
+        "record_id": rec.get("record_id", ""),
+        "company_name": _tv(fl.get("客户公司")),
+        "recipient_email": _tv(fl.get("收件邮箱")),
+        "subject": _tv(fl.get("主题")),
+        "body": _tv(fl.get("正文")),
+        "sender": _tv(fl.get("发件人")),
+        "status": _tv(fl.get("发送状态")) or "成功",
+        "sent_at": _tv(fl.get("发送时间")),
+        "lead_record_id": _tv(fl.get("线索record_id")),
+        "generated_by": _tv(fl.get("生成方式")),
+    }
+
+
+def _fetch_emails() -> list:
+    """读取开发信记录表全部记录（按发送时间倒序）。写入量低，直接实时查询。"""
+    tid = _ensure_emails_table()
+    items = []
+    page_token = None
+    while True:
+        path = f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records?page_size=100"
+        if page_token:
+            path += f"&page_token={page_token}"
+        resp = _feishu_api("GET", path)
+        data = resp.get("data", {})
+        for it in data.get("items", []):
+            items.append(_norm_email_record(it))
+        if not data.get("has_more"):
+            break
+        page_token = data.get("page_token")
+    items.sort(key=lambda x: x.get("sent_at", ""), reverse=True)
+    return items
+
+
+def _warmup_emails_table():
+    """启动后台预热开发信记录表（自动建表），失败不影响服务启动。"""
+    try:
+        n = len(_fetch_emails())
+        print(f"[emails] 飞书开发信记录表初始化完成（{n} 条）")
+    except Exception as e:
+        print(f"[emails] 飞书开发信记录表初始化失败（接口调用时将自动重试）: {e}")
+
+
+# ------------------------------------------------------------
+# SMTP 发信（标准库 smtplib + email.mime，SSL 465，零新依赖）
+# ------------------------------------------------------------
+def _split_mail_addrs(s) -> list:
+    """逗号/分号分隔的收件人字符串 -> 邮箱列表。"""
+    if isinstance(s, (list, tuple)):
+        return [str(a).strip() for a in s if str(a).strip()]
+    return [a.strip() for a in re.split(r"[;,]", s or "") if a.strip()]
+
+
+def _smtp_send_mail(to_addrs, subject, body, cc=None,
+                    sender_email=None, sender_password=None) -> str:
+    """同步 SMTP 发信（阻塞，必须在 asyncio.to_thread 中调用）。
+    支持 SSL 465 / STARTTLS 587；成功返回实际发件地址，失败抛 RuntimeError。"""
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.utils import formataddr
+
+    to_list = _split_mail_addrs(to_addrs)
+    cc_list = _split_mail_addrs(cc)
+    if not to_list:
+        raise RuntimeError("收件人邮箱不能为空")
+    # 请求体传入 sender_email/sender_password 时以该销售邮箱登录（多销售多邮箱预留），
+    # 否则用系统默认配置 settings.smtp_*。
+    smtp_user = (sender_email or "").strip() or _settings_val("smtp_user", "")
+    smtp_password = (sender_password or "").strip() or _settings_val("smtp_password", "")
+    smtp_host = _settings_val("smtp_host", "smtp.exmail.qq.com")
+    try:
+        smtp_port = int(_settings_val("smtp_port", "465") or 465)
+    except (TypeError, ValueError):
+        smtp_port = 465
+    smtp_from_name = _settings_val("smtp_from_name", "RHC Veterinary Medical")
+    if not smtp_user or not smtp_password:
+        raise RuntimeError("发件邮箱未配置（缺少 SMTP_USER 或 SMTP_PASSWORD/客户端授权码）")
+
+    msg = MIMEText(body or "", "plain", "utf-8")
+    msg["From"] = formataddr((smtp_from_name, smtp_user))
+    msg["To"] = ", ".join(to_list)
+    if cc_list:
+        msg["Cc"] = ", ".join(cc_list)
+    msg["Subject"] = subject or ""
+    rcpts = to_list + cc_list
+    try:
+        if smtp_port == 465:
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30) as srv:
+                srv.login(smtp_user, smtp_password)
+                srv.sendmail(smtp_user, rcpts, msg.as_string())
+        else:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as srv:
+                srv.ehlo()
+                srv.starttls()
+                srv.ehlo()
+                srv.login(smtp_user, smtp_password)
+                srv.sendmail(smtp_user, rcpts, msg.as_string())
+    except Exception as e:
+        raise RuntimeError(
+            f"SMTP 发信失败（{smtp_user} → {', '.join(to_list)}）：{e}")
+    return smtp_user
+
+
+async def send_email(to_addrs, subject, body, cc=None,
+                     sender_email=None, sender_password=None) -> str:
+    """异步发信：to_thread 包装同步 SMTP，返回实际发件地址。"""
+    return await asyncio.to_thread(
+        _smtp_send_mail, to_addrs, subject, body, cc,
+        sender_email, sender_password)
+
+
+# ------------------------------------------------------------
+# 开发信生成：Coze 工作流优先，本地高质量英文模板兜底
+# ------------------------------------------------------------
+def _build_local_cold_email(info: dict):
+    """本地兜底：生成地道 B2B 英文冷邮件，返回 (subject, body)。
+    结构：自我介绍（RHC=中国兽用医疗器械制造商）+ 国家/行业个性化切入
+    + 针对需求产品的价值点 + 轻 CTO + 落款。"""
+    company = (info.get("company_name") or "").strip()
+    country = (info.get("country") or "").strip()
+    product = (info.get("product") or "").strip() or "veterinary medical equipment"
+    industry = (info.get("industry") or "").strip()
+    decision_maker = (info.get("decision_maker") or "").strip()
+    tone = (info.get("tone") or "正式").strip()
+    selling_points = (info.get("selling_points") or "").strip()
+    sender_name = (info.get("sender_name") or "").strip() or "Ella Chen"
+    is_friendly = tone in ("友好", "friendly", "Friendly")
+    is_concise = tone in ("简洁", "concise", "Concise")
+
+    first_name = decision_maker.split()[0] if decision_maker else ""
+    greeting = f"Hi {first_name}," if first_name else f"Hello {company} team,"
+
+    # 一句话自我介绍
+    if is_friendly:
+        intro = ("I'm Ella from RHC Medical, a China-based manufacturer of veterinary "
+                 "medical equipment, working with clinics and distributors in over 60 countries.")
+    else:
+        intro = ("This is Ella from RHC Medical, a China-based manufacturer of veterinary "
+                 "anesthesia, monitoring and surgical equipment, supplying clinics and "
+                 "distributors worldwide.")
+
+    # 结合客户国家/行业的个性化切入
+    if country and industry:
+        hook = (f"We understand the {country} veterinary market is growing quickly, and "
+                f"businesses in the {industry} space like {company} are looking for "
+                f"reliable equipment partners with competitive pricing.")
+    elif country:
+        hook = (f"We understand the {country} veterinary market is growing quickly, and "
+                f"clinics and distributors there are increasingly looking for reliable, "
+                f"cost-effective equipment with responsive after-sales support.")
+    elif industry:
+        hook = (f"As a business in the {industry} space, {company} may find a "
+                f"factory-direct equipment partner with solid export experience useful.")
+    else:
+        hook = ("Clinics and distributors we work with value a factory-direct partner with "
+                "consistent quality and responsive after-sales support.")
+
+    # 针对需求产品的价值点（销售自定义卖点优先嵌入）
+    value_parts = []
+    if selling_points:
+        value_parts.append(selling_points.rstrip(". "))
+    value_parts.append("CE-certified quality with factory-direct pricing")
+    value_parts.append("flexible MOQ and OEM/customization options")
+    value_line = "; ".join(value_parts) + "."
+    product_line = (f"Our {product} range is among the most requested by our partners, "
+                    f"shipping with full English documentation.")
+
+    # 轻 CTO
+    if is_friendly:
+        cto = ("Would it be worth sending you our latest catalog and a price list for "
+               "reference?")
+    else:
+        cto = ("Would you be open to reviewing our product catalog and a quotation tailored "
+               "to your market?")
+
+    if is_concise:
+        subject = f"RHC {product} – factory-direct supply for {company}"
+        body = (
+            f"{greeting}\n\n"
+            f"{intro}\n\n"
+            f"{value_line} {product_line}\n\n"
+            f"{cto}\n\n"
+            f"Best regards,\n{sender_name}\nRHC Medical"
+        )
+        return subject, body
+
+    if is_friendly:
+        subject = f"A quick note on veterinary equipment supply for {company}"
+    else:
+        subject = f"Factory-direct veterinary equipment supply for {company}"
+    body = (
+        f"{greeting}\n\n"
+        f"{intro}\n\n"
+        f"{hook}\n\n"
+        f"For your reference: {value_line} {product_line}\n\n"
+        f"{cto}\n\n"
+        f"Best regards,\n{sender_name}\nRHC Medical"
+    )
+    return subject, body
+
+
+def _extract_email_payload(data: dict) -> dict:
+    """从工作流返回中提取 subject/body。
+    兼容：(a)结束节点各字段已是独立值 (b)某字段装着整份JSON字符串（含中英文 key）。"""
+    def _maybe_load(v):
+        if isinstance(v, str):
+            s = v.strip()
+            if s.startswith("{"):
+                try:
+                    return json.loads(s)
+                except Exception:
+                    return None
+        return None
+
+    # 情况b：任一字符串字段里装着整份结果 JSON
+    for v in data.values():
+        emb = _maybe_load(v)
+        if isinstance(emb, dict) and any(
+                k in emb for k in ("subject", "body", "主题", "正文", "content")):
+            return {
+                "subject": emb.get("subject") or emb.get("主题") or "",
+                "body": emb.get("body") or emb.get("正文") or emb.get("content") or "",
+            }
+    # 情况a：字段已各归各位
+    return {
+        "subject": data.get("subject") or data.get("主题") or "",
+        "body": data.get("body") or data.get("正文") or data.get("content") or "",
+    }
+
+
+class EmailGenerateRequest(BaseModel):
+    record_id: str = ""
+    company_name: str = ""
+    country: str = ""
+    product: str = ""
+    industry: str = ""
+    website: str = ""
+    email_pattern: str = ""
+    decision_maker: str = ""
+    recipient_email: str = ""
+    tone: str = "正式"          # 正式 / 友好 / 简洁
+    selling_points: str = ""
+    sender_name: str = ""
+
+
+@app.post("/api/emails/generate")
+async def api_emails_generate(req: EmailGenerateRequest, request: Request):
+    """生成开发信（不落库、不发送）。Coze 工作流优先，失败自动回退本地英文模板。需JWT认证。"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info:
+        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    info = {
+        "company_name": (req.company_name or "").strip(),
+        "country": (req.country or "").strip(),
+        "product": (req.product or "").strip(),
+        "industry": (req.industry or "").strip(),
+        "website": (req.website or "").strip(),
+        "email_pattern": (req.email_pattern or "").strip(),
+        "decision_maker": (req.decision_maker or "").strip(),
+        "recipient_email": (req.recipient_email or "").strip(),
+        "tone": (req.tone or "正式").strip() or "正式",
+        "selling_points": (req.selling_points or "").strip(),
+        "sender_name": (req.sender_name or "").strip(),
+    }
+    if not info["company_name"] and not (req.record_id or "").strip():
+        return JSONResponse({"ok": False, "message": "缺少客户公司名称或线索 record_id"},
+                            status_code=400)
+    generated_by = "template"
+    subject, body = "", ""
+    try:
+        wf_id = _settings_val("coze_email_workflow_id", "")
+        pat = getattr(settings, "COZE_PAT", "") or getattr(settings, "coze_pat", "") or ""
+        if wf_id and pat and info["company_name"]:
+            try:
+                parameters = {
+                    "record_id": (req.record_id or "").strip(),
+                    "company_name": info["company_name"],
+                    "country": info["country"],
+                    "product": info["product"],
+                    "industry": info["industry"],
+                    "website": info["website"],
+                    "email_pattern": info["email_pattern"],
+                    "decision_maker": info["decision_maker"],
+                    "recipient_email": info["recipient_email"],
+                    "tone": info["tone"],
+                    "selling_points": info["selling_points"],
+                    "sender_name": info["sender_name"],
+                }
+                data = await asyncio.wait_for(
+                    asyncio.to_thread(_coze_workflow_run, wf_id, parameters, 60),
+                    timeout=70)
+                parsed = _extract_email_payload(data)
+                subject = str(parsed.get("subject") or "").strip()
+                body = str(parsed.get("body") or "").strip()
+                if subject and body:
+                    generated_by = "AI"
+                else:
+                    print(f"[email] AI工作流返回缺 subject/body，回退模板: {str(data)[:200]}")
+            except Exception as e:
+                print(f"[email] AI开发信生成失败，回退本地模板（{info['company_name']}）: {e}")
+        if generated_by != "AI":
+            subject, body = _build_local_cold_email(info)
+        return {"ok": True, "subject": subject, "body": body,
+                "generated_by": generated_by}
+    except Exception as e:
+        # 兜底中的兜底：任何异常都不返回 5xx，保证前端拿到可用内容
+        print(f"[email] 开发信生成异常，使用最简模板: {e}")
+        try:
+            subject, body = _build_local_cold_email(info)
+        except Exception:
+            subject = f"Veterinary equipment supply from RHC"
+            body = (f"Hello,\n\nThis is Ella from RHC Medical, a China-based manufacturer "
+                    f"of veterinary medical equipment. May I send you our catalog and a "
+                    f"quotation?\n\nBest regards,\n"
+                    f"{info['sender_name'] or 'Ella Chen'}\nRHC Medical")
+        return {"ok": True, "subject": subject, "body": body,
+                "generated_by": "template"}
+
+
+class EmailSendRequest(BaseModel):
+    record_id: str = ""
+    company_name: str = ""
+    recipient_email: str = ""
+    cc: str = ""
+    subject: str = ""
+    body: str = ""
+    sender_name: str = ""
+    sender_email: str = ""     # 可选：用销售自己的邮箱登录 SMTP（多邮箱预留）
+    sender_password: str = ""  # 可选：该邮箱的客户端授权码
+    generated_by: str = ""     # 可选：AI / template（随生成结果带回）
+
+
+@app.post("/api/emails/send")
+async def api_emails_send(req: EmailSendRequest, request: Request):
+    """真实发送开发信并落库：先发信，成功后写「开发信记录」+ 更新线索跟进字段。需JWT认证。"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info:
+        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    record_id = (req.record_id or "").strip()
+    company_name = (req.company_name or "").strip()
+    recipient = (req.recipient_email or "").strip()
+    subject = (req.subject or "").strip()
+    body = (req.body or "").strip()
+    if not recipient:
+        return JSONResponse({"ok": False, "message": "收件人邮箱不能为空"}, status_code=400)
+    if not subject or not body:
+        return JSONResponse({"ok": False, "message": "邮件主题和正文不能为空"}, status_code=400)
+
+    # 1) 真实发送；失败直接返回错误，不落库
+    try:
+        actual_sender = await send_email(
+            recipient, subject, body, cc=(req.cc or "").strip() or None,
+            sender_email=(req.sender_email or "").strip() or None,
+            sender_password=(req.sender_password or "").strip() or None)
+    except Exception as e:
+        print(f"[email] 开发信发送失败 -> {recipient}: {e}")
+        return JSONResponse({"ok": False, "message": str(e)}, status_code=502)
+
+    now_bj = datetime.now(timezone(timedelta(hours=8)))
+    sent_at = now_bj.strftime("%Y-%m-%d %H:%M:%S")
+    sent_min = now_bj.strftime("%Y-%m-%d %H:%M")
+    sender_display = (req.sender_name or "").strip()
+    sender_field = f"{sender_display} <{actual_sender}>" if sender_display else actual_sender
+
+    # 2) 写开发信记录（生成方式：AI→AI，template→模板，缺省不写该字段）
+    gen_mode = ""
+    if (req.generated_by or "").strip().upper() == "AI":
+        gen_mode = "AI"
+    elif (req.generated_by or "").strip().lower() == "template":
+        gen_mode = "模板"
+    email_fields = {
+        "客户公司": company_name,
+        "收件邮箱": recipient,
+        "主题": subject,
+        "正文": body,
+        "发件人": sender_field,
+        "发送状态": "成功",
+        "发送时间": sent_at,
+        "线索record_id": record_id,
+    }
+    if gen_mode:
+        email_fields["生成方式"] = gen_mode
+    email_rec_id = ""
+    try:
+        tid = _ensure_emails_table()
+        resp = _feishu_api(
+            "POST", f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records",
+            {"fields": email_fields})
+        email_rec_id = resp.get("data", {}).get("record", {}).get("record_id", "")
+    except Exception as e:
+        # 邮件已真实发出，落库失败不回滚发送，仅记录日志
+        print(f"[email] 开发信记录落库失败（邮件已发送）: {e}")
+
+    # 3) 更新线索跟进字段（发信次数读不到当 0 → 1）
+    sent_count = 1
+    if record_id:
+        try:
+            ltid = _ensure_leads_table()
+            old_count = 0
+            try:
+                rresp = _feishu_api(
+                    "GET",
+                    f"/bitable/v1/apps/{FEISHU_ATK}/tables/{ltid}/records/{record_id}")
+                old_val = rresp.get("data", {}).get("record", {}).get("fields", {}).get("发信次数")
+                if old_val not in (None, ""):
+                    old_count = int(float(str(_tv(old_val)).strip() or 0))
+            except Exception:
+                old_count = 0
+            sent_count = old_count + 1
+            _feishu_api(
+                "PUT",
+                f"/bitable/v1/apps/{FEISHU_ATK}/tables/{ltid}/records/{record_id}",
+                {"fields": {
+                    "跟进状态": "开发信已发",
+                    "发件邮箱": actual_sender,
+                    "最近发信时间": sent_min,
+                    "发信次数": sent_count,
+                }})
+            _invalidate_leads_cache()
+        except Exception as e:
+            print(f"[email] 更新线索跟进字段失败（{record_id}，邮件已发送）: {e}")
+
+    return {"ok": True, "message_id": email_rec_id, "sent_at": sent_at,
+            "sent_count": sent_count, "sender_email": actual_sender}
+
+
+@app.get("/api/emails")
+async def api_emails_list(request: Request, record_id: str = ""):
+    """开发信发信历史，可按 ?record_id= 过滤线索；按发送时间倒序。需JWT认证。"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info:
+        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    try:
+        items = _fetch_emails()
+        rid = (record_id or "").strip()
+        if rid:
+            items = [m for m in items if m.get("lead_record_id") == rid]
+        return {"ok": True, "items": items, "total": len(items)}
+    except Exception as e:
+        print(f"[emails] 发信历史读取失败: {e}")
+        return JSONResponse({"ok": False, "message": f"发信历史读取失败：{e}"}, status_code=502)
+
+# ============================================================
 # 公海池/私海池 API + 定时搜索任务
 # ============================================================
 
@@ -3685,6 +4302,8 @@ threading.Thread(target=_warmup_account_table, daemon=True).start()
 threading.Thread(target=_warmup_leads_table, daemon=True).start()
 # 启动时后台预热飞书「消息通知」表（自动建表），不阻塞服务启动
 threading.Thread(target=_warmup_messages_table, daemon=True).start()
+# 启动时后台预热飞书「开发信记录」表（自动建表），不阻塞服务启动
+threading.Thread(target=_warmup_emails_table, daemon=True).start()
 
 # Serve frontend - try multiple possible locations
 _candidate_dirs = [

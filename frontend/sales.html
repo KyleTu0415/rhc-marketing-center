@@ -292,23 +292,77 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
 .score-green{background:#E6F9F1;color:#0D7B57}
 .score-gray{background:#F0F2F3;color:#637089}
 .claim-tag{font-size:12px;font-weight:700;color:var(--color-primary);white-space:nowrap}
-/* 2列网格布局 */
-.lead-public-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-@media (max-width:900px){.lead-public-grid{grid-template-columns:1fr}}
-/* 紧凑卡片 */
-.lead-public-card{padding:12px 14px;border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface);transition:box-shadow var(--transition-fast);display:flex;flex-direction:column;gap:6px;min-height:140px}
-.lead-public-card:hover{box-shadow:var(--shadow-md)}
-.lead-public-card.claimed{opacity:0.65;filter:grayscale(0.3)}
+/* 单列堆叠布局（v2.1：客户反馈2列卡片不美观，改回单列信息丰富卡片） */
+.lead-public-grid{display:block}
+.lead-public-grid .lead-public-card{margin-bottom:14px}
+.lead-public-grid .lead-public-card:last-child{margin-bottom:0}
+/* 专业B2B客户卡片 */
+.lead-public-card{padding:16px 18px;border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface);transition:box-shadow var(--transition-fast),border-color var(--transition-fast)}
+.lead-public-card:hover{box-shadow:var(--shadow-md);border-color:var(--color-primary-light)}
+.lead-public-card.claimed{opacity:0.62;filter:grayscale(0.35)}
 .lead-public-card.claimed:hover{opacity:0.8;filter:grayscale(0.15)}
-/* 顶行：评分+状态 */
+/* 顶行：评分+补搜状态+认领/跟进状态 */
 .lpc-top-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-/* 公司名 */
-.lpc-company{font-size:14px;font-weight:700;color:var(--color-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
-/* 紧凑字段行 */
-.lpc-field-row{font-size:12px;color:var(--color-text-secondary);line-height:1.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.lpc-field-row .lpc-icon{margin-right:4px;opacity:0.7}
+.lpc-top-row .lpc-spacer{margin-left:auto}
+.lpc-claim-tag{display:inline-flex;align-items:center;padding:3px 12px;border-radius:20px;font-size:11px;font-weight:700;white-space:nowrap}
+.lpc-claim-free{background:#F0F2F3;color:#637089}
+.lpc-claim-mine{background:var(--color-primary-light);color:var(--color-primary-dark)}
+.lpc-claim-other{background:#F0F2F3;color:#637089;border:1px solid var(--color-border)}
+.lpc-grade-chip{display:inline-flex;align-items:center;padding:2px 9px;border-radius:4px;font-size:11px;font-weight:700}
+.lpc-grade-a{background:#E6F9F1;color:#0D7B57}
+.lpc-grade-b{background:#E8F0FE;color:#1A56C4}
+.lpc-grade-c{background:#F0F2F3;color:#637089}
+/* 公司名行 */
+.lpc-company-row{display:flex;align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap}
+.lpc-company{font-size:16px;font-weight:700;color:var(--color-text);line-height:1.4}
+.lpc-company a{color:var(--color-text)}
+.lpc-company a:hover{color:var(--color-primary)}
+.lpc-company-link{font-size:13px;flex-shrink:0}
+/* 信息分区 */
+.lpc-info-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px 24px;margin-top:12px}
+.lpc-info{display:flex;align-items:flex-start;gap:7px;font-size:12.5px;line-height:1.6;min-width:0}
+.lpc-info.lpc-full{grid-column:1/-1}
+.lpc-info .lpc-ico{flex-shrink:0;width:18px;text-align:center}
+.lpc-info .lpc-k{color:var(--color-text-tertiary);flex-shrink:0;font-weight:600}
+.lpc-info .lpc-v{color:var(--color-text);word-break:break-word;min-width:0}
+.lpc-info .lpc-v a{color:var(--color-primary);font-weight:500;word-break:break-all}
+.lpc-hint{margin-top:10px;font-size:12px;color:var(--color-text-secondary);background:var(--color-bg);border-left:3px solid var(--color-primary-light);border-radius:0 var(--radius-sm) var(--radius-sm) 0;padding:9px 12px;line-height:1.7}
+.lpc-hint strong{color:var(--color-text)}
+.lpc-source-line{margin-top:10px;font-size:12px}
 /* 底行按钮 */
-.lpc-actions{display:flex;gap:8px;margin-top:auto;padding-top:8px;border-top:1px solid var(--color-border-light);flex-wrap:wrap;align-items:center}
+.lpc-actions{display:flex;gap:8px;margin-top:14px;padding-top:12px;border-top:1px solid var(--color-border-light);flex-wrap:wrap;align-items:center}
+@media (max-width:760px){.lpc-info-grid{grid-template-columns:1fr;gap:6px}.lead-public-card{padding:14px}}
+
+/* ===== 客户详情 + 开发信弹窗 ===== */
+.cd-overlay{display:none;position:fixed;inset:0;background:rgba(17,24,39,0.5);z-index:9998;align-items:center;justify-content:center;padding:20px}
+.cd-overlay.show{display:flex}
+.cd-modal-box{background:#fff;border-radius:12px;width:100%;max-width:720px;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.25)}
+.cd-modal-header{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:15px 22px;border-bottom:1px solid var(--color-border-light);flex-shrink:0}
+.cd-modal-title{font-size:15px;font-weight:700;color:var(--color-text);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.cd-modal-close{background:none;border:none;font-size:22px;cursor:pointer;color:#999;width:28px;height:28px;display:flex;align-items:center;justify-content:center;border-radius:4px;line-height:1;flex-shrink:0}
+.cd-modal-close:hover{background:var(--color-bg);color:var(--color-text)}
+.cd-modal-body{flex:1;overflow-y:auto;padding:18px 22px 22px}
+.cd-section-title{font-size:13px;font-weight:700;color:var(--color-text);margin:0 0 10px;display:flex;align-items:center;gap:6px;padding-bottom:8px;border-bottom:1px solid var(--color-border-light)}
+.cd-section-title:not(:first-child){margin-top:22px}
+.cd-profile-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px 20px}
+.cd-field{display:flex;align-items:flex-start;gap:7px;font-size:12.5px;line-height:1.6;min-width:0}
+.cd-field.cd-full{grid-column:1/-1}
+.cd-field .cd-k{color:var(--color-text-tertiary);flex-shrink:0;font-weight:600}
+.cd-field .cd-v{color:var(--color-text);word-break:break-word;min-width:0}
+.cd-field .cd-v a{color:var(--color-primary);font-weight:500;word-break:break-all}
+@media (max-width:600px){.cd-profile-grid{grid-template-columns:1fr}.cd-modal-box{max-height:94vh}.cd-overlay{padding:0}}
+.cd-history{margin-top:6px;border:1px solid var(--color-border-light);border-radius:var(--radius-md);overflow:hidden}
+.cd-history-empty{padding:16px;text-align:center;font-size:12.5px;color:var(--color-text-tertiary);background:var(--color-bg)}
+.cd-history-item{padding:11px 14px;border-bottom:1px solid var(--color-border-light);font-size:12.5px;line-height:1.6}
+.cd-history-item:last-child{border-bottom:none}
+.cd-history-sub{font-weight:600;color:var(--color-text)}
+.cd-history-meta{font-size:11.5px;color:var(--color-text-tertiary);margin-top:3px;display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.cd-history-body{margin-top:6px;font-size:12px;color:var(--color-text-secondary);white-space:pre-wrap;word-break:break-word}
+.cd-form-row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media (max-width:600px){.cd-form-row2{grid-template-columns:1fr}}
+.cd-gen-note{font-size:11.5px;margin-top:6px;color:var(--color-text-tertiary)}
+.cd-gen-note.ai{color:var(--color-success);font-weight:600}
+.cd-modal-footer{display:flex;gap:10px;justify-content:flex-end;padding:13px 22px;border-top:1px solid var(--color-border-light);flex-shrink:0;flex-wrap:wrap}
 /* 补搜状态徽章 */
 .enrich-status{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:500;white-space:nowrap}
 .enrich-status-pending{color:var(--color-text-tertiary)}
@@ -460,9 +514,8 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
     <div class="page-header">
       <div><h2>我的客户</h2><p>从公海认领的线索，进入你的私海工作台</p></div>
       <div class="page-header-actions">
-        <button class="btn btn-outline btn-sm" onclick="loadMyCustomers()">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-          刷新
+        <button class="btn-icon-refresh" onclick="loadMyCustomers(true)" title="刷新客户列表">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
         </button>
       </div>
     </div>
@@ -809,6 +862,63 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
           <button class="btn btn-primary btn-sm" onclick="saveLibPreferences()">保存设置</button>
         </div>
       </div>
+    </div>
+  </div>
+</div>
+<div id="customer-detail-modal" class="cd-overlay" onclick="if(event.target===this)closeCustomerDetail()">
+  <div class="cd-modal-box" role="dialog" aria-modal="true" aria-label="客户详情与开发信">
+    <div class="cd-modal-header">
+      <span class="cd-modal-title" id="cd-title">客户详情</span>
+      <button type="button" class="cd-modal-close" onclick="closeCustomerDetail()" aria-label="关闭">&times;</button>
+    </div>
+    <div class="cd-modal-body">
+      <!-- 上半：客户档案 -->
+      <div class="cd-section-title">📇 客户档案</div>
+      <div class="cd-profile-grid" id="cd-profile"></div>
+      <div class="cd-section-title">📨 发信历史</div>
+      <div class="cd-history" id="cd-history">
+        <div class="cd-history-empty">加载中…</div>
+      </div>
+      <!-- 下半：开发信 -->
+      <div class="cd-section-title">✉️ 撰写开发信</div>
+      <div class="form-group">
+        <label>收件人邮箱</label>
+        <input type="email" id="cd-email" placeholder="recipient@company.com">
+      </div>
+      <div class="cd-form-row2">
+        <div class="form-group">
+          <label>抄送（可选，多个用逗号分隔）</label>
+          <input type="text" id="cd-cc" placeholder="cc@company.com">
+        </div>
+        <div class="form-group">
+          <label>语气</label>
+          <select id="cd-tone">
+            <option value="formal">正式</option>
+            <option value="friendly">友好</option>
+            <option value="concise">简洁</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>卖点（可选）</label>
+        <textarea id="cd-selling-points" rows="2" placeholder="补充想强调的卖点，如CE认证、工厂直供…"></textarea>
+      </div>
+      <div class="form-group" style="margin-bottom:10px">
+        <button type="button" class="btn btn-outline btn-sm" id="cd-gen-btn" onclick="generateCustomerEmail()">✨ AI生成开发信</button>
+        <span class="cd-gen-note" id="cd-gen-note"></span>
+      </div>
+      <div class="form-group">
+        <label>主题（可编辑）</label>
+        <input type="text" id="cd-subject" placeholder="Email subject">
+      </div>
+      <div class="form-group" style="margin-bottom:6px">
+        <label>正文（可编辑，英文）</label>
+        <textarea id="cd-body" rows="10" style="min-height:200px" placeholder="Dear ..."></textarea>
+      </div>
+    </div>
+    <div class="cd-modal-footer">
+      <button type="button" class="btn btn-outline" onclick="closeCustomerDetail()">取消</button>
+      <button type="button" class="btn btn-primary" id="cd-send-btn" onclick="sendCustomerEmail()">📤 发送</button>
     </div>
   </div>
 </div>
@@ -2610,6 +2720,8 @@ var myCustomersLoaded=false;
 var publicPoolCache=null;  // {items: [...], timestamp: Date}
 var publicPoolPollTimer=null;  // 补搜轮询定时器
 var PUBLIC_POOL_CACHE_TTL=5*60*1000; // 5分钟
+var myCustomersCache=null;  // {items: [...], timestamp: Date} 私海5分钟内存缓存（v2.1）
+var MY_CUSTOMERS_CACHE_TTL=5*60*1000;
 
 function getClaimerName(){
   var name=localStorage.getItem('rhc_claimer_name');
@@ -2684,6 +2796,168 @@ function loadPublicPool(forceRefresh){
     });
 }
 
+/* ===== 线索字段统一取值（中英文双兜底，v2.1） ===== */
+function leadPick(ld,keys){
+  for(var i=0;i<keys.length;i++){
+    var v=ld?ld[keys[i]]:'';
+    if(v!=null&&String(v).trim()!=='')return String(v).trim();
+  }
+  return '';
+}
+/* 过滤搜索引擎等假网址；返回规范化URL或空串 */
+function normExternalUrl(u){
+  var s=String(u||'').trim();
+  if(!s)return '';
+  if(!/^https?:\/\//i.test(s))s='https://'+s;
+  if(/duckduckgo\.com/i.test(s))return '';
+  if(!/^https?:\/\/[^\s.]+\.[^\s]+$/i.test(s))return '';
+  return s;
+}
+function looksLikeEmail(s){return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s||'').trim())}
+/* 评级徽章 */
+function gradeChipHtml(g){
+  var v=String(g||'').trim().toUpperCase();
+  if(v.charAt(0)==='A')return '<span class="lpc-grade-chip lpc-grade-a">A 级</span>';
+  if(v.charAt(0)==='B')return '<span class="lpc-grade-chip lpc-grade-b">B 级</span>';
+  if(v.charAt(0)==='C')return '<span class="lpc-grade-chip lpc-grade-c">C 级</span>';
+  return '';
+}
+/* 跟进状态标签（后端返回中文状态，按关键词着色，原样显示） */
+function followStatusTagHtml(status){
+  var s=String(status||'待开发');
+  var cls='mc-status-pending';
+  if(/成交|已回/.test(s))cls='mc-status-won';
+  else if(/报价|PI/i.test(s))cls='mc-status-quoted';
+  else if(/已发|跟进中|已联系/.test(s))cls='mc-status-following';
+  return '<span class="mc-status-tag '+cls+'">'+esc(s)+'</span>';
+}
+/* 线索对象归一化（公海/私海/搜索结果共用） */
+function normalizeLead(ld){
+  var n={raw:ld};
+  n.rid=leadPick(ld,['record_id','_record_id','id']);
+  n.score=parseInt(leadPick(ld,['综合评分','score']),10)||0;
+  n.company=leadPick(ld,['公司名','公司机构','company_name','company'])||leadPick(ld,['标题','title'])||'（未知公司）';
+  n.country=leadPick(ld,['国家','country']);
+  if(!n.country){
+    var region=leadPick(ld,['国家/地区','地区','region']);
+    n.country=region?region.split(' - ').pop().trim():'';
+  }
+  n.industry=leadPick(ld,['行业','industry']);
+  n.product=leadPick(ld,['需求产品','product','product_demand']);
+  n.website=normExternalUrl(leadPick(ld,['官网','website']));
+  n.emailPattern=leadPick(ld,['邮箱格式','email_pattern']);
+  n.email=leadPick(ld,['邮箱','联系邮箱','email'])||(looksLikeEmail(n.emailPattern)?n.emailPattern:'');
+  n.contact=leadPick(ld,['联系方式','contact']);
+  n.decisionMaker=leadPick(ld,['决策人','decision_maker','联系人']);
+  var li=leadPick(ld,['LinkedIn','linkedin']);
+  n.linkedin=li;
+  n.linkedinUrl=(/^https?:\/\//i.test(li))?li:(/linkedin\.com/i.test(li)?'https://'+li.replace(/^\/+/,''):'');
+  n.importRecord=leadPick(ld,['进口记录','import_record','import_records']);
+  n.sourceUrl=normExternalUrl(leadPick(ld,['来源URL','source_url','原文链接','url']));
+  n.grade=leadPick(ld,['评级','confidence','grade']);
+  n.recommendedProduct=leadPick(ld,['推荐产品','recommended_product','recommend_product']);
+  n.followAdvice=leadPick(ld,['跟进建议','follow_advice','ai_suggestion']);
+  n.claimStatus=leadPick(ld,['认领状态','claim_status']);
+  n.claimer=leadPick(ld,['认领人','claimer','claimed_by']);
+  n.claimedAt=leadPick(ld,['认领时间','claimed_at']);
+  n.followStatus=leadPick(ld,['跟进状态','follow_status','状态','status'])||'待开发';
+  n.sentCount=leadPick(ld,['发信次数','sent_count','email_count']);
+  n.lastSentAt=leadPick(ld,['最近发信时间','last_sent_at']);
+  n.enrichStatus=leadPick(ld,['补搜状态','enrich_status']);
+  n.isClaimed=(n.claimStatus==='已认领')||!!n.claimer||!!ld.claimed;
+  return n;
+}
+/* 卡片信息行 */
+function lpcInfo(icon,label,valueHtml,full){
+  if(valueHtml==null||valueHtml==='')return '';
+  return '<div class="lpc-info'+(full?' lpc-full':'')+'"><span class="lpc-ico">'+icon+'</span><span class="lpc-k">'+label+'</span><span class="lpc-v">'+valueHtml+'</span></div>';
+}
+/* 统一客户卡片渲染：scope=public（公海池）/ mine（我的客户），差异仅在顶行状态与操作按钮 */
+function renderLeadCard(ld,scope){
+  var n=normalizeLead(ld);
+  var claimerName=getClaimerName();
+  var isMine=n.claimer&&claimerName&&n.claimer===claimerName;
+  var cardClass='lead-public-card'+((scope==='public'&&n.isClaimed&&!isMine)?' claimed':'');
+  var ridAttr=esc(String(n.rid));
+  var h='<div class="'+cardClass+'" id="lpc-card-'+ridAttr+'">';
+  /* 顶行：评分 + 评级 + 补搜状态 + 认领/跟进状态 */
+  h+='<div class="lpc-top-row">';
+  h+=scoreBadgeHtml(n.score);
+  if(n.grade)h+=gradeChipHtml(n.grade);
+  h+=buildEnrichStatusHtml(n.enrichStatus);
+  h+='<span class="lpc-spacer"></span>';
+  if(scope==='mine'){
+    h+=followStatusTagHtml(n.followStatus);
+  }else if(n.isClaimed){
+    if(isMine){
+      h+='<span class="lpc-claim-tag lpc-claim-mine">已认领 · 我</span>';
+    }else{
+      h+='<span class="lpc-claim-tag lpc-claim-other">已认领 · '+esc(n.claimer||'他人')+'</span>';
+    }
+  }else{
+    h+='<span class="lpc-claim-tag lpc-claim-free">未认领</span>';
+  }
+  h+='</div>';
+  /* 公司名（有官网则可点击外链） */
+  h+='<div class="lpc-company-row"><span class="lpc-company">';
+  if(n.website){
+    h+='<a href="'+esc(n.website)+'" target="_blank" rel="noopener noreferrer" title="打开公司官网">'+esc(n.company)+'</a>';
+  }else{
+    h+=esc(n.company);
+  }
+  h+='</span>';
+  if(n.website)h+='<a class="lpc-company-link" href="'+esc(n.website)+'" target="_blank" rel="noopener noreferrer" title="官网新窗口打开">🌐</a>';
+  h+='</div>';
+  /* 信息分区 */
+  h+='<div class="lpc-info-grid">';
+  if(n.country||n.industry){
+    h+=lpcInfo('🌍','国家 / 行业',esc([n.country,n.industry].filter(Boolean).join(' · ')));
+  }
+  if(n.product)h+=lpcInfo('📦','需求产品',esc(n.product));
+  if(n.email){
+    h+=lpcInfo('✉️','邮箱','<a href="mailto:'+esc(n.email)+'">'+esc(n.email)+'</a>');
+  }else if(n.emailPattern){
+    var epHtml=looksLikeEmail(n.emailPattern)?'<a href="mailto:'+esc(n.emailPattern)+'">'+esc(n.emailPattern)+'</a>':esc(n.emailPattern);
+    h+=lpcInfo('✉️','邮箱格式',epHtml);
+  }
+  if(n.website)h+=lpcInfo('🌐','官网','<a href="'+esc(n.website)+'" target="_blank" rel="noopener noreferrer">'+esc(n.website)+'</a>');
+  if(n.decisionMaker)h+=lpcInfo('👤','决策人',esc(n.decisionMaker));
+  if(n.linkedin){
+    var liHtml=n.linkedinUrl?'<a href="'+esc(n.linkedinUrl)+'" target="_blank" rel="noopener noreferrer">'+esc(n.linkedin)+'</a>':esc(n.linkedin);
+    h+=lpcInfo('💼','LinkedIn',liHtml);
+  }
+  if(n.importRecord)h+=lpcInfo('🚢','进口记录',esc(n.importRecord),true);
+  if(n.recommendedProduct)h+=lpcInfo('⭐','推荐产品',esc(n.recommendedProduct));
+  if(n.contact)h+=lpcInfo('📞','其他联系方式',esc(n.contact));
+  if(scope==='mine'){
+    if(n.claimer)h+=lpcInfo('🧑\u200d💼','认领人',esc(n.claimer));
+    if(n.claimedAt)h+=lpcInfo('🕐','认领时间',esc(n.claimedAt));
+    if(n.sentCount!=='')h+=lpcInfo('📨','发信次数',esc(n.sentCount));
+    if(n.lastSentAt)h+=lpcInfo('🕘','最近发信',esc(n.lastSentAt));
+  }
+  h+='</div>';
+  if(n.followAdvice)h+='<div class="lpc-hint"><strong>💡 跟进建议：</strong>'+esc(n.followAdvice)+'</div>';
+  if(n.sourceUrl)h+='<div class="lpc-source-line"><a href="'+esc(n.sourceUrl)+'" target="_blank" rel="noopener noreferrer">查看来源 ↗</a></div>';
+  /* 底行操作 */
+  h+='<div class="lpc-actions">';
+  if(scope==='mine'){
+    h+='<button type="button" class="btn btn-primary btn-sm" onclick="openCustomerDetail(\''+ridAttr+'\',\'mine\',true)">✉️ 写开发信</button>';
+    h+='<button type="button" class="btn btn-outline btn-sm" onclick="openCustomerDetail(\''+ridAttr+'\',\'mine\',false)">查看详情</button>';
+  }else if(n.isClaimed){
+    if(isMine){
+      h+='<button type="button" class="btn btn-primary btn-sm" onclick="openCustomerDetail(\''+ridAttr+'\',\'public\',true)">✉️ 写开发信</button>';
+      h+='<button type="button" class="btn btn-outline btn-sm" onclick="openCustomerDetail(\''+ridAttr+'\',\'public\',false)">查看详情</button>';
+    }
+    /* 被他人认领：仅展示标签，无操作按钮（补全按钮除外） */
+  }else{
+    h+='<button type="button" class="btn btn-primary btn-sm" onclick="claimLead(\''+ridAttr+'\',this)">认领</button>';
+  }
+  if(scope==='public')h+=buildEnrichButtonHtml(n.rid,n.enrichStatus);
+  h+='</div>';
+  h+='</div>';
+  return h;
+}
+
 function renderPublicPool(){
   var el=document.getElementById('public-pool-list');
   var stats=document.getElementById('public-pool-stats');
@@ -2695,79 +2969,7 @@ function renderPublicPool(){
     return;
   }
   var html='<div class="lead-public-grid">';
-  html+=publicPoolLeads.map(function(ld){
-    var rid=ld.record_id||ld.id||'';
-    var score=parseInt(ld.score||ld['综合评分']||0,10);
-    var company=ld.company||ld['公司机构']||ld['标题']||'（未知公司）';
-    var country=ld.country||ld['国家/地区']||ld.region||'';
-    var product=ld.product||ld['需求产品']||ld['商机类型']||'';
-    var email=(ld.email||ld['联系邮箱']||'').trim();
-    var website=(ld.website||ld['官网']||'').trim();
-    var industry=(ld.industry||ld['行业']||'').trim();
-    var contact=(ld.contact||ld['联系方式']||'').trim();
-    var isClaimed=!!(ld.claimed||ld.claimed_by);
-    var claimedBy=ld.claimed_by||'';
-    var isMine=claimedBy&&claimerName&&claimedBy===claimerName;
-    var cardClass='lead-public-card'+(isClaimed?' claimed':'');
-    var enrichStatus=ld['补搜状态']||ld.enrich_status||'';
-    // 截断公司名
-    var companyDisplay=company.length>20?company.substring(0,20)+'…':company;
-    var h='<div class="'+cardClass+'" id="lpc-card-'+esc(String(rid))+'">';
-    // 顶行：评分 + 补搜状态
-    h+='<div class="lpc-top-row">';
-    h+=scoreBadgeHtml(score);
-    h+=buildEnrichStatusHtml(enrichStatus);
-    h+='</div>';
-    // 公司名
-    h+='<div class="lpc-company" title="'+esc(company)+'">'+esc(companyDisplay)+'</div>';
-    // 国家 + 行业
-    if(country||industry){
-      h+='<div class="lpc-field-row"><span class="lpc-icon">'+(country?'🌍':'')+'</span>'+esc(country)+(country&&industry?' · ':'')+esc(industry)+'</div>';
-    }
-    // 产品需求
-    if(product){
-      h+='<div class="lpc-field-row"><span class="lpc-icon">📦</span>需求：'+esc(product)+'</div>';
-    }
-    // 官网 + 邮箱（只显示有的）
-    if(website||email){
-      var contactLine='<div class="lpc-field-row">';
-      if(website)contactLine+='<span class="lpc-icon">🌐</span>'+esc(website);
-      if(website&&email)contactLine+='  ';
-      if(email)contactLine+='<span class="lpc-icon">✉</span>'+esc(email);
-      contactLine+='</div>';
-      h+=contactLine;
-    }
-    // 联系方式（其他）
-    if(contact&&!email&&!website){
-      h+='<div class="lpc-field-row"><span class="lpc-icon">📞</span>'+esc(contact)+'</div>';
-    }
-    // 深度补全后才显示的字段
-    var contactPerson=(ld['决策人']||ld['联系人']||'').trim();
-    var linkedin=(ld['LinkedIn']||ld.linkedin||'').trim();
-    var importInfo=(ld['进口记录']||ld['import_records']||'').trim();
-    var isDeepDone=enrichStatus==='已深度补全';
-    if(isDeepDone&&(contactPerson||linkedin||importInfo)){
-      if(contactPerson)h+='<div class="lpc-field-row"><span class="lpc-icon">👤</span>'+esc(contactPerson)+'</div>';
-      if(linkedin)h+='<div class="lpc-field-row"><span class="lpc-icon">💼</span>LinkedIn: '+esc(linkedin)+'</div>';
-      if(importInfo)h+='<div class="lpc-field-row"><span class="lpc-icon">📋</span>'+esc(importInfo)+'</div>';
-    }
-    // 底行按钮
-    h+='<div class="lpc-actions">';
-    if(isClaimed){
-      if(isMine){
-        h+='<button type="button" class="btn btn-primary btn-sm" onclick="switchPage(\'mycustomers\',document.querySelector(\'[data-page=mycustomers]\'))">已认领 · 去我的客户</button>';
-      }else{
-        h+='<button type="button" class="btn btn-outline btn-sm" disabled style="opacity:.55;cursor:not-allowed">已被 '+esc(claimedBy)+' 认领</button>';
-      }
-    }else{
-      h+='<button type="button" class="btn btn-primary btn-sm" onclick="claimLead(\''+esc(String(rid))+'\',this)">认领</button>';
-    }
-    // 补全信息按钮
-    h+=buildEnrichButtonHtml(rid,enrichStatus);
-    h+='</div>';
-    h+='</div>';
-    return h;
-  }).join('');
+  html+=publicPoolLeads.map(function(ld){return renderLeadCard(ld,'public')}).join('');
   html+='</div>';
   el.innerHTML=html;
 }
@@ -2881,7 +3083,9 @@ function claimLead(rid,btn){
     if(res.status===200&&res.data&&res.data.ok){
       showToast('认领成功，已进入「我的客户」','success');
       publicPoolCache=null;
+      myCustomersCache=null;
       loadPublicPool(true);
+      loadMyCustomers(true);
       updateMcBadge();
     }else if(res.status===409){
       var by=(res.data&&res.data.claimed_by)||'他人';
@@ -2900,9 +3104,20 @@ function claimLead(rid,btn){
   });
 }
 
-function loadMyCustomers(){
+function loadMyCustomers(forceRefresh){
   var el=document.getElementById('mc-list');
   var stats=document.getElementById('mc-stats');
+  // 缓存命中且未过期：直接渲染，零等待（仿公海池，v2.1）
+  if(!forceRefresh&&myCustomersCache&&(Date.now()-myCustomersCache.timestamp<MY_CUSTOMERS_CACHE_TTL)){
+    myCustomersList=myCustomersCache.items;
+    myCustomersLoaded=true;
+    leadsAll=myCustomersList.slice();
+    leadsLoaded=true;
+    renderMyCustomers();
+    updateMcBadge();
+    renderMailCustomerOptions();
+    return;
+  }
   if(el)el.innerHTML='<div class="loading-state"><div class="spin"></div><div>正在加载我的客户…</div></div>';
   if(stats)stats.textContent='加载中…';
   fetch('/api/leads/my',{headers:authHeaders(),cache:'no-store'})
@@ -2916,11 +3131,12 @@ function loadMyCustomers(){
       myCustomersList=Array.isArray(d.items)?d.items:(Array.isArray(d)?d:[]);
       // Sort by claim time descending
       myCustomersList.sort(function(a,b){
-        var ta=a.claimed_at||a['认领时间']||'';
-        var tb=b.claimed_at||b['认领时间']||'';
-        return tb.localeCompare(ta);
+        var na=normalizeLead(a),nb=normalizeLead(b);
+        return String(nb.claimedAt).localeCompare(String(na.claimedAt));
       });
       myCustomersLoaded=true;
+      // 写入缓存
+      myCustomersCache={items:myCustomersList.slice(),timestamp:Date.now()};
       // Sync to leadsAll for backward compatibility with mail system
       leadsAll=myCustomersList.slice();
       leadsLoaded=true;
@@ -2934,7 +3150,7 @@ function loadMyCustomers(){
         if(String(e&&e.message)==='UNAUTHORIZED'){
           el.innerHTML='<div class="empty-state"><div class="es-icon">'+SIGNAL_ICON_WARN+'</div><div class="es-title">登录已过期</div><div class="es-desc">请先登录后查看你的客户。</div><div style="margin-top:14px"><a class="btn btn-primary btn-sm" href="login.html">去登录</a></div></div>';
         }else{
-          el.innerHTML='<div class="empty-state"><div class="es-icon">'+SIGNAL_ICON_WARN+'</div><div class="es-title">客户加载失败</div><div class="es-desc">可能是网络异常，请重试。</div><div style="margin-top:14px"><button class="btn btn-primary btn-sm" onclick="loadMyCustomers()">重试加载</button></div></div>';
+          el.innerHTML='<div class="empty-state"><div class="es-icon">'+SIGNAL_ICON_WARN+'</div><div class="es-title">客户加载失败</div><div class="es-desc">可能是网络异常，请重试。</div><div style="margin-top:14px"><button class="btn btn-primary btn-sm" onclick="loadMyCustomers(true)">重试加载</button></div></div>';
         }
       }
       if(stats)stats.textContent='';
@@ -2950,34 +3166,9 @@ function renderMyCustomers(){
     el.innerHTML='<div class="empty-state"><div class="es-icon">'+SIGNAL_ICON_RSS+'</div><div class="es-title">暂无客户</div><div class="es-desc">你还没有认领任何线索。去「商机信号」挑选你的第一个客户吧</div><div style="margin-top:14px"><button class="btn btn-primary btn-sm" onclick="switchPage(\'signals\',document.querySelector(\'[data-page=signals]\'))">去商机信号</button></div></div>';
     return;
   }
-  var html=myCustomersList.map(function(ld){
-    var rid=ld.record_id||ld.id||'';
-    var score=parseInt(ld.score||ld['综合评分']||0,10);
-    var company=ld.company||ld['公司机构']||ld['标题']||'（未知公司）';
-    var country=ld.country||ld['国家/地区']||ld.region||'';
-    var product=ld.product||ld['需求产品']||'';
-    var contact=ld.contact||ld['联系方式']||ld['联系邮箱']||'';
-    var status=ld.status||ld['状态']||'待开发';
-    var claimedAt=ld.claimed_at||ld['认领时间']||'';
-    var h='<div class="mc-card">';
-    h+='<div class="mc-header">';
-    h+=scoreBadgeHtml(score);
-    h+='<span class="mc-company">'+esc(company)+'</span>';
-    h+=mcStatusTag(status);
-    if(country)h+='<span class="sig-region-tag">'+esc(country)+'</span>';
-    h+='</div>';
-    h+='<div class="mc-fields">';
-    if(product)h+='<div><span class="lpc-field-label">需求产品：</span><span class="lpc-field-value">'+esc(product)+'</span></div>';
-    if(contact)h+='<div><span class="lpc-field-label">联系方式：</span><span class="lpc-field-value">'+esc(contact)+'</span></div>';
-    if(claimedAt)h+='<div><span class="lpc-field-label">认领时间：</span><span class="lpc-field-value">'+esc(claimedAt)+'</span></div>';
-    h+='</div>';
-    h+='<div class="mc-actions">';
-    h+='<button type="button" class="btn btn-outline btn-sm" disabled title="接入后自动开放" style="opacity:.5;cursor:not-allowed">写开发信</button>';
-    h+='<button type="button" class="btn btn-outline btn-sm" onclick="showToast(\'详情页开发中\',\'info\')">查看详情</button>';
-    h+='</div>';
-    h+='</div>';
-    return h;
-  }).join('');
+  var html='<div class="lead-public-grid">';
+  html+=myCustomersList.map(function(ld){return renderLeadCard(ld,'mine')}).join('');
+  html+='</div>';
   el.innerHTML=html;
 }
 
@@ -3104,8 +3295,9 @@ function claimSearchLead(leadId) {
     var actions = card.querySelector('.slc-actions');
     if (actions) actions.innerHTML = '<span style="font-size:12px;color:var(--color-success);font-weight:600">✓ 已认领跟进</span>';
     publicPoolCache=null;
+    myCustomersCache=null;
     loadPublicPool(true);
-    loadMyCustomers();
+    loadMyCustomers(true);
   })
   .catch(function() { showToast('认领失败，请重试', 'error'); });
 }
@@ -3115,6 +3307,248 @@ function dismissSearchLead(leadId) {
   if (!card) return;
   card.style.display = 'none';
   showToast('已跳过该线索');
+}
+
+/* ============================================================
+   客户详情 + 开发信弹窗（v2.1）
+   ============================================================ */
+var currentDetailLead=null;   // 归一化后的当前客户
+var currentDetailRaw=null;    // 原始线索对象
+var currentDetailScope='mine';
+
+/* 在公海/私海缓存中按 record_id 查找原始线索 */
+function findLeadRecordById(rid){
+  var lists=[myCustomersList,publicPoolLeads];
+  for(var i=0;i<lists.length;i++){
+    var arr=lists[i]||[];
+    for(var j=0;j<arr.length;j++){
+      var id=leadPick(arr[j],['record_id','_record_id','id']);
+      if(String(id)===String(rid))return arr[j];
+    }
+  }
+  return null;
+}
+
+function openCustomerDetail(rid,scope,writeMode){
+  var raw=findLeadRecordById(rid);
+  if(!raw){showToast('未找到该客户，请刷新列表后重试','error');return}
+  var n=normalizeLead(raw);
+  // 公海进入：仅本人认领可写开发信
+  if(scope==='public'&&(!n.isClaimed)){showToast('请先认领该客户后再跟进','error');return}
+  var claimerName=getClaimerName();
+  if(scope==='public'&&n.isClaimed&&(!claimerName||n.claimer!==claimerName)){
+    showToast('该客户已被 '+esc(n.claimer||'他人')+' 认领','error');return;
+  }
+  currentDetailRaw=raw;
+  currentDetailLead=n;
+  currentDetailScope=scope||'mine';
+
+  /* 标题区 */
+  document.getElementById('cd-title').innerHTML=
+    esc(n.company)+' '+scoreBadgeHtml(n.score)+' '+followStatusTagHtml(n.followStatus);
+
+  /* 档案字段（有值才显示） */
+  function pf(icon,label,val,full){
+    if(val==null||val==='')return '';
+    return '<div class="cd-field'+(full?' cd-full':'')+'"><span style="flex-shrink:0">'+icon+'</span><span class="cd-k">'+label+'</span><span class="cd-v">'+val+'</span></div>';
+  }
+  function link(u,text){return '<a href="'+esc(u)+'" target="_blank" rel="noopener noreferrer">'+esc(text||u)+'</a>'}
+  var ph='';
+  ph+=pf('🌍','国家',esc(n.country));
+  ph+=pf('🏭','行业',esc(n.industry));
+  ph+=pf('📦','需求产品',esc(n.product));
+  ph+=pf('🌐','官网',n.website?link(n.website,n.website):'');
+  if(n.email)ph+=pf('✉️','邮箱','<a href="mailto:'+esc(n.email)+'">'+esc(n.email)+'</a>');
+  else if(n.emailPattern)ph+=pf('✉️','邮箱格式',looksLikeEmail(n.emailPattern)?'<a href="mailto:'+esc(n.emailPattern)+'">'+esc(n.emailPattern)+'</a>':esc(n.emailPattern));
+  ph+=pf('👤','决策人',esc(n.decisionMaker));
+  ph+=pf('💼','LinkedIn',n.linkedinUrl?link(n.linkedinUrl,n.linkedin):esc(n.linkedin));
+  ph+=pf('🚢','进口记录',esc(n.importRecord),true);
+  ph+=pf('🔗','来源',n.sourceUrl?link(n.sourceUrl,'查看来源 ↗'):'');
+  ph+=pf('🏷️','评级',n.grade?esc(n.grade)+' 级':'');
+  ph+=pf('⭐','推荐产品',esc(n.recommendedProduct));
+  ph+=pf('🧑\u200d💼','认领人',esc(n.claimer));
+  ph+=pf('🕐','认领时间',esc(n.claimedAt));
+  ph+=pf('📨','发信次数',n.sentCount!==''?esc(n.sentCount):'');
+  ph+=pf('🕘','最近发信时间',esc(n.lastSentAt));
+  ph+=pf('💡','跟进建议',esc(n.followAdvice),true);
+  ph+=pf('📞','其他联系方式',esc(n.contact),true);
+  document.getElementById('cd-profile').innerHTML=ph||'<div style="grid-column:1/-1;font-size:12.5px;color:var(--color-text-tertiary)">暂无更多档案信息，可点击卡片「补全信息」后自动汇聚。</div>';
+
+  /* 表单初始化 */
+  document.getElementById('cd-email').value=n.email||(looksLikeEmail(n.emailPattern)?n.emailPattern:'');
+  document.getElementById('cd-cc').value='';
+  document.getElementById('cd-tone').value='formal';
+  document.getElementById('cd-selling-points').value='';
+  document.getElementById('cd-subject').value='';
+  document.getElementById('cd-body').value='';
+  var genNote=document.getElementById('cd-gen-note');
+  genNote.textContent='';genNote.className='cd-gen-note';
+
+  document.getElementById('customer-detail-modal').classList.add('show');
+  loadEmailHistory(n.rid);
+  if(writeMode){
+    setTimeout(function(){
+      var em=document.getElementById('cd-email');
+      if(em&&!em.value)em.focus();
+      var sp=document.getElementById('cd-selling-points');
+      if(sp&&em&&em.value)sp.focus();
+    },120);
+  }
+}
+
+function closeCustomerDetail(){
+  document.getElementById('customer-detail-modal').classList.remove('show');
+  currentDetailLead=null;currentDetailRaw=null;
+}
+document.addEventListener('keydown',function(e){
+  if(e.key==='Escape'){
+    var m=document.getElementById('customer-detail-modal');
+    if(m&&m.classList.contains('show'))closeCustomerDetail();
+  }
+});
+
+/* 发信历史：GET /api/emails?record_id=xxx（items 内为中文字段，做容错） */
+function loadEmailHistory(rid){
+  var box=document.getElementById('cd-history');
+  if(!box)return;
+  box.innerHTML='<div class="cd-history-empty">加载中…</div>';
+  fetch('/api/emails?record_id='+encodeURIComponent(rid),{headers:authHeaders(),cache:'no-store'})
+    .then(function(r){
+      if(r.status===401)throw new Error('UNAUTHORIZED');
+      if(!r.ok)throw new Error('HTTP '+r.status);
+      return r.json();
+    })
+    .then(function(d){
+      var items=(d&&Array.isArray(d.items))?d.items:[];
+      if(!items.length){
+        box.innerHTML='<div class="cd-history-empty">尚未发送开发信</div>';
+        return;
+      }
+      box.innerHTML=items.map(function(it){
+        var subj=it['主题']||it.subject||'(无主题)';
+        var to=it['收件邮箱']||it.recipient_email||it.recipient||'';
+        var sender=it['发件人']||it.sender||'';
+        var time=it['发送时间']||it.sent_at||it.created_at||'';
+        var st=it['发送状态']||it.status||'';
+        var body=it['正文']||it.body||'';
+        var stCls=/成功|已发|sent|success/i.test(st)?'mc-status-won':'mc-status-pending';
+        var h='<div class="cd-history-item">';
+        h+='<div class="cd-history-sub">'+esc(subj)+'</div>';
+        h+='<div class="cd-history-meta">';
+        if(to)h+='<span>收件人：'+esc(to)+'</span>';
+        if(time)h+='<span>'+esc(time)+'</span>';
+        if(st)h+='<span class="mc-status-tag '+stCls+'">'+esc(st)+'</span>';
+        if(sender)h+='<span>发件人：'+esc(sender)+'</span>';
+        h+='</div>';
+        if(body)h+='<details style="margin-top:6px"><summary style="cursor:pointer;font-size:11.5px;color:var(--color-primary)">查看正文</summary><div class="cd-history-body">'+esc(body)+'</div></details>';
+        h+='</div>';
+        return h;
+      }).join('');
+    })
+    .catch(function(){
+      box.innerHTML='<div class="cd-history-empty">尚未发送开发信</div>';
+    });
+}
+
+/* AI 生成开发信：POST /api/emails/generate */
+function generateCustomerEmail(){
+  var n=currentDetailLead;
+  if(!n)return;
+  var recipient=document.getElementById('cd-email').value.trim();
+  var btn=document.getElementById('cd-gen-btn');
+  btn.disabled=true;btn.innerHTML='<span class="enrich-spinner"></span> 生成中…';
+  var payload={
+    record_id:n.rid,
+    company_name:n.company,
+    country:n.country,
+    product:n.product,
+    industry:n.industry,
+    website:n.website,
+    email_pattern:n.emailPattern,
+    decision_maker:n.decisionMaker,
+    recipient_email:recipient,
+    tone:document.getElementById('cd-tone').value,
+    selling_points:document.getElementById('cd-selling-points').value.trim(),
+    sender_name:getClaimerName()||(currentUser&&currentUser.name)||''
+  };
+  fetch('/api/emails/generate',{
+    method:'POST',
+    headers:Object.assign({'Content-Type':'application/json'},authHeaders()),
+    body:JSON.stringify(payload)
+  }).then(function(r){
+    return r.json().then(function(d){return {status:r.status,data:d}});
+  }).then(function(res){
+    btn.disabled=false;btn.innerHTML='✨ AI生成开发信';
+    if(res.status===401){showToast('登录已过期，请重新登录','error');return}
+    var d=res.data||{};
+    if(res.status>=200&&res.status<300&&d&&d.ok!==false&&d.body){
+      document.getElementById('cd-subject').value=d.subject||'';
+      document.getElementById('cd-body').value=d.body||'';
+      var note=document.getElementById('cd-gen-note');
+      if(d.generated_by==='AI'){
+        note.textContent='✓ AI 生成';note.className='cd-gen-note ai';
+      }else{
+        note.textContent='当前为模板生成，AI工作流接入后自动升级';note.className='cd-gen-note';
+      }
+      showToast('开发信已生成，请核对后发送','success');
+    }else{
+      showToast((d&&(d.detail||d.error||d.message))||'生成失败，请稍后重试','error');
+    }
+  }).catch(function(e){
+    btn.disabled=false;btn.innerHTML='✨ AI生成开发信';
+    showToast('网络异常，生成失败：'+(e&&e.message?e.message:''),'error');
+  });
+}
+
+/* 发送开发信：POST /api/emails/send（真实邮箱发出，发送前二次确认） */
+function sendCustomerEmail(){
+  var n=currentDetailLead;
+  if(!n)return;
+  var recipient=document.getElementById('cd-email').value.trim();
+  var subject=document.getElementById('cd-subject').value.trim();
+  var body=document.getElementById('cd-body').value.trim();
+  if(!recipient){showToast('请填写收件人邮箱','error');return}
+  if(!looksLikeEmail(recipient)){showToast('收件人邮箱格式不正确','error');return}
+  if(!subject){showToast('请填写邮件主题','error');return}
+  if(!body){showToast('邮件正文为空','error');return}
+  var ok=confirm('确认发送？\n\n将通过 ellachen@rhcmed.com 真实发送邮件给 '+recipient+'，发送后不可撤回。');
+  if(!ok)return;
+  var btn=document.getElementById('cd-send-btn');
+  btn.disabled=true;btn.innerHTML='<span class="enrich-spinner"></span> 发送中…';
+  var payload={
+    record_id:n.rid,
+    company_name:n.company,
+    recipient_email:recipient,
+    cc:document.getElementById('cd-cc').value.trim(),
+    subject:subject,
+    body:body,
+    sender_name:getClaimerName()||(currentUser&&currentUser.name)||''
+  };
+  fetch('/api/emails/send',{
+    method:'POST',
+    headers:Object.assign({'Content-Type':'application/json'},authHeaders()),
+    body:JSON.stringify(payload)
+  }).then(function(r){
+    return r.json().then(function(d){return {status:r.status,data:d}});
+  }).then(function(res){
+    btn.disabled=false;btn.innerHTML='📤 发送';
+    if(res.status===401){showToast('登录已过期，请重新登录','error');return}
+    var d=res.data||{};
+    if(res.status>=200&&res.status<300&&d&&d.ok!==false){
+      showToast('开发信已发送','success');
+      closeCustomerDetail();
+      // 认领/发信后强制刷新私海与公海缓存
+      myCustomersCache=null;
+      publicPoolCache=null;
+      loadMyCustomers(true);
+      loadPublicPool(true);
+    }else{
+      showToast((d&&(d.detail||d.error||d.message))||'发送失败，请稍后重试','error');
+    }
+  }).catch(function(e){
+    btn.disabled=false;btn.innerHTML='📤 发送';
+    showToast('网络异常，发送失败：'+(e&&e.message?e.message:''),'error');
+  });
 }
 
 </script>
