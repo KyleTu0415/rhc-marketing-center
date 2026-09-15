@@ -4985,8 +4985,21 @@ async def api_admin_cleanup_fake_leads(request: Request):
             skipped.append({"record_id": rid, "company": c["company"], "reason": "已认领，保护不删"})
             continue
         try:
+            # 删除前拉取完整原始记录做备份（fields 全量）
+            full = {}
+            try:
+                rget = _feishu_api(
+                    "GET", f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records/{rid}")
+                full = rget.get("data", {}).get("record", {}) or {}
+            except Exception as ge:
+                print(f"[cleanup] 删除前读取完整记录失败 {rid}: {ge}")
             _feishu_api("DELETE", f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records/{rid}")
-            backup.append(c)
+            backup.append({
+                "record_id": rid,
+                "summary": {k: c.get(k) for k in
+                            ("company", "title", "url", "claim_status", "score", "enrich", "reason")},
+                "full_record": full,
+            })
             deleted.append(rid)
         except Exception as e:
             skipped.append({"record_id": rid, "company": c["company"], "reason": f"删除失败: {e}"})
