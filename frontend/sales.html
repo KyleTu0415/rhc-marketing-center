@@ -286,6 +286,38 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
 .sig-stats{font-size:12px;color:var(--color-text-tertiary);font-weight:400}
 .sig-retry-note{margin-top:14px;font-size:12px;color:var(--color-text-tertiary);text-align:center;line-height:1.7}
 
+/* ===== 公海池：评分徽章 / 认领标签 / 已认领卡片 ===== */
+.score-badge{display:inline-flex;align-items:center;gap:4px;padding:3px 12px;border-radius:20px;font-size:12px;font-weight:700;white-space:nowrap}
+.score-gold{background:#FFF8E1;color:#F57F17}
+.score-green{background:#E6F9F1;color:#0D7B57}
+.score-gray{background:#F0F2F3;color:#637089}
+.claim-tag{font-size:12px;font-weight:700;color:var(--color-primary);white-space:nowrap}
+.lead-public-card{background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:16px;margin-bottom:16px;transition:all var(--transition-fast)}
+.lead-public-card:last-child{margin-bottom:0}
+.lead-public-card:hover{box-shadow:var(--shadow-sm);border-color:var(--color-primary-light)}
+.lead-public-card.claimed{opacity:0.65;filter:grayscale(0.3)}
+.lead-public-card.claimed:hover{opacity:0.8;filter:grayscale(0.15)}
+.lpc-header{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+.lpc-company{font-size:15px;font-weight:700;color:var(--color-text)}
+.lpc-fields{display:grid;grid-template-columns:1fr 1fr;gap:8px 16px;margin:10px 0;font-size:12px}
+.lpc-fields .lpc-field-label{color:var(--color-text-tertiary);font-weight:500}
+.lpc-fields .lpc-field-value{color:var(--color-text);font-weight:500}
+.lpc-actions{display:flex;gap:8px;margin-top:12px;padding-top:10px;border-top:1px solid var(--color-border-light);flex-wrap:wrap;align-items:center}
+/* ===== 我的客户 ===== */
+.mc-card{background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:16px;margin-bottom:16px;transition:all var(--transition-fast)}
+.mc-card:last-child{margin-bottom:0}
+.mc-card:hover{box-shadow:var(--shadow-sm);border-color:var(--color-primary-light)}
+.mc-header{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+.mc-company{font-size:15px;font-weight:700;color:var(--color-text)}
+.mc-status-tag{display:inline-flex;align-items:center;padding:2px 10px;border-radius:20px;font-size:11px;font-weight:600}
+.mc-status-pending{background:#FFF4E0;color:#B27A1B}
+.mc-status-following{background:#E8F0FE;color:#1A56C4}
+.mc-status-quoted{background:#F3E8FD;color:#7C3AED}
+.mc-status-won{background:#E6F9F1;color:#0D7B57}
+.mc-fields{display:grid;grid-template-columns:1fr 1fr;gap:8px 16px;margin:10px 0;font-size:12px}
+.mc-actions{display:flex;gap:8px;margin-top:12px;padding-top:10px;border-top:1px solid var(--color-border-light);flex-wrap:wrap;align-items:center}
+.mc-badge-count{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--color-primary-xlight);color:var(--color-primary-dark);font-size:11px;font-weight:700;margin-left:4px}
+
 @media(max-width:860px){
   .sidebar{width:56px;min-width:56px}
   .sidebar .sidebar-logo span,.sidebar .nav-item span,.sidebar .nav-section,.sidebar .sidebar-user .user-info{display:none}
@@ -351,6 +383,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
   <div class="sidebar-nav">
     <div class="nav-section">销售智能助手</div>
     <div class="nav-item active" data-page="signals" onclick="switchPage('signals',this)" role="button" tabindex="0"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49m-8.48-.01a6 6 0 0 1 0-8.49m11.31-2.82a10 10 0 0 1 0 14.14m-14.14 0a10 10 0 0 1 0-14.14"/></svg><span>商机信号</span></div>
+    <div class="nav-item" data-page="mycustomers" onclick="switchPage('mycustomers',this)" role="button" tabindex="0"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg><span>我的客户</span><span id="mc-badge" class="mc-badge-count" style="display:none">0</span></div>
     <div class="nav-item" data-page="mail" onclick="switchPage('mail',this)" role="button" tabindex="0"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg><span>邮件助手</span></div>
     <div class="nav-item" data-page="grading" onclick="switchPage('grading',this)" role="button" tabindex="0"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg><span>客户分级</span></div>
     <div class="nav-item" data-page="pi" onclick="switchPage('pi',this)" role="button" tabindex="0"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg><span>PI工作台</span></div>
@@ -362,7 +395,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
     <main class="content-area">
     <section class="page active" id="page-signals">
     <div class="page-header">
-      <div><h2>商机信号</h2><p>多信源公开行业资讯每日采集，AI 自动识别商机类型，高价值商机优先响应</p></div>
+      <div><h2>商机信号 · 公海池</h2><p>全网商机线索汇聚，按综合评分排序，优质线索优先认领；认领后进入「我的客户」私海工作台</p></div>
       <div class="page-header-actions">
         <button class="btn btn-primary" onclick="searchNewLeads()">🔍 搜索新线索</button>
       </div>
@@ -379,18 +412,13 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
     </div>
     <div class="card">
       <div class="card-header" style="flex-wrap:wrap;gap:8px 16px;justify-content:space-between;align-items:center">
-        <div style="display:flex;gap:10px 12px;flex-wrap:wrap;align-items:center" id="sig-subtabs">
-          <button type="button" class="sig-subtab active" data-view="pool" onclick="setSignalView('pool')">公共信号池</button>
-          <button type="button" class="sig-subtab" data-view="mine" onclick="setSignalView('mine')">我的线索 <span class="subtab-badge" id="sig-mine-count" style="display:none">0</span></button>
-        </div>
-        <span class="card-sub sig-stats" id="sig-stats">加载中…</span>
+        <h3>公海线索池</h3>
+        <span class="card-sub sig-stats" id="public-pool-stats">加载中…</span>
       </div>
       <div class="card-body">
-        <div id="sig-filter" style="margin-top:-8px;margin-bottom:12px"></div>
-        <div id="signal-list">
-          <div class="loading-state"><div class="spin"></div><div>正在加载商机信号…</div></div>
+        <div id="public-pool-list">
+          <div class="loading-state"><div class="spin"></div><div>正在加载公海线索…</div></div>
         </div>
-        <div id="lead-list" style="display:none"></div>
       </div>
     </div>
     <div class="card">
@@ -400,6 +428,29 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
         <div class="intel-point"><span class="ip-tag">接入中</span><div><strong>B2B 平台询盘：</strong>阿里国际站、Made-in-China 询盘与采购信息自动采集（部分接口受平台规则限制，接入方式待评估）。</div></div>
         <div class="intel-point"><span class="ip-tag">接入中</span><div><strong>展会名录与官网询盘：</strong>VMX、WVC 等展会名片与参展商名录导入；官网询盘表单、企业社媒消息统一汇入信号流（正式版上线）。</div></div>
         <div style="margin-top:12px;font-size:12px;color:var(--color-text-tertiary);line-height:1.8">正式版由 AI 定时采集 → 初筛去噪 → 分级推送。信号分三档：<strong>立即跟进</strong>（高意向 · 24 小时内响应）、<strong>建议跟进</strong>（中意向 · 3 日内）、<strong>待核实</strong>（信息不足，补齐后再分级），与客户档案的 A/B/C 分级相互独立。处理流程：线上信号进公共池，<strong>认领</strong>即锁定归属（其他销售不可见联系方式，防止撞单）；线下信号（展会扫码、手动录入）录入即自动归属接待人，无需认领。归属后在时效内发开发信 → 客户回复确认后转为客户，档案自动建立并完成 A/B/C 分级；<strong>14 天</strong>无跟进自动释放回公共池。被过滤的噪音进入噪音列表，可逐条核查、误判可捞回。</div>
+      </div>
+    </div>
+    </section>
+
+    <section class="page" id="page-mycustomers">
+    <div class="page-header">
+      <div><h2>我的客户</h2><p>从公海认领的线索，进入你的私海工作台</p></div>
+      <div class="page-header-actions">
+        <button class="btn btn-outline btn-sm" onclick="loadMyCustomers()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          刷新
+        </button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <h3>私海客户列表</h3>
+        <span class="card-sub" id="mc-stats">加载中…</span>
+      </div>
+      <div class="card-body">
+        <div id="mc-list">
+          <div class="loading-state"><div class="spin"></div><div>正在加载我的客户…</div></div>
+        </div>
       </div>
     </div>
     </section>
@@ -741,7 +792,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
 <script src="assets/rhc-config.js"></script>
 <script src="assets/rhc-insights.js?v=20260903a"></script>
 <script>
-function switchPage(pageId,el){document.querySelectorAll('.page').forEach(function(p){p.classList.remove('active')});var t=document.getElementById('page-'+pageId);if(t){t.classList.remove('active');void t.offsetWidth;t.classList.add('active')}document.querySelectorAll('.sidebar-nav .nav-item').forEach(function(n){n.classList.remove('active')});if(el)el.classList.add('active');var ca=document.querySelector('.content-area');if(ca)ca.scrollTop=0;if(pageId==='notify'&&typeof loadSalesNotify==='function'){loadSalesNotify();loadSalesNotifyBadge();}}
+function switchPage(pageId,el){document.querySelectorAll('.page').forEach(function(p){p.classList.remove('active')});var t=document.getElementById('page-'+pageId);if(t){t.classList.remove('active');void t.offsetWidth;t.classList.add('active')}document.querySelectorAll('.sidebar-nav .nav-item').forEach(function(n){n.classList.remove('active')});if(el)el.classList.add('active');var ca=document.querySelector('.content-area');if(ca)ca.scrollTop=0;if(pageId==='signals'){loadPublicPool();}if(pageId==='mycustomers'){loadMyCustomers();}if(pageId==='notify'&&typeof loadSalesNotify==='function'){loadSalesNotify();loadSalesNotifyBadge();}}
 document.querySelectorAll('.sidebar-nav .nav-item').forEach(function(item){item.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();item.click()}})});
 /* ===== 产品清单（内置兜底，均为 RHC 真实在售产品；接口可用时以 /api/products 返回为准） ===== */
 var PRODUCTS=[
@@ -2071,9 +2122,8 @@ renderProductPick();
 renderMailProducts(PRODUCTS);
 renderMailMaterials();
 renderStylePanel();
-loadCurrentUser().then(function(){ if(sigLoaded)renderSignals() });
-loadSignals();
-loadLeads();
+loadCurrentUser().then(function(){ loadPublicPool(); });
+loadMyCustomers();
 fetch('/api/products',{cache:'no-store'})
   .then(function(r){if(!r.ok)throw new Error('products '+r.status);return r.json()})
   .then(function(d){
@@ -2527,6 +2577,262 @@ function salesNotifyGotoSignal(){
 }
 loadSalesNotifyBadge();
 
+/* ===== 公海池 & 我的客户（v2.0 重构） ===== */
+var publicPoolLeads=[];
+var myCustomersList=[];
+var publicPoolLoaded=false;
+var myCustomersLoaded=false;
+
+function getClaimerName(){
+  var name=localStorage.getItem('rhc_claimer_name');
+  if(name)return name;
+  if(currentUser&&currentUser.name){
+    localStorage.setItem('rhc_claimer_name',currentUser.name);
+    return currentUser.name;
+  }
+  return '';
+}
+
+function scoreBadgeHtml(score){
+  var s=parseInt(score,10)||0;
+  var cls='score-gray',prefix='';
+  if(s>=80){cls='score-gold';prefix='⭐ '}
+  else if(s>=60){cls='score-green'}
+  return '<span class="score-badge '+cls+'">'+prefix+s+'分</span>';
+}
+
+function mcStatusTag(status){
+  var map={
+    '待开发':'mc-status-pending',
+    '跟进中':'mc-status-following',
+    '已报价':'mc-status-quoted',
+    '已成交':'mc-status-won'
+  };
+  var cls=map[status]||'mc-status-pending';
+  return '<span class="mc-status-tag '+cls+'">'+esc(status||'待开发')+'</span>';
+}
+
+function loadPublicPool(){
+  var el=document.getElementById('public-pool-list');
+  var stats=document.getElementById('public-pool-stats');
+  if(el)el.innerHTML='<div class="loading-state"><div class="spin"></div><div>正在加载公海线索…</div></div>';
+  if(stats)stats.textContent='加载中…';
+  fetch('/api/leads/public',{headers:authHeaders(),cache:'no-store'})
+    .then(function(r){
+      if(r.status===401)throw new Error('UNAUTHORIZED');
+      if(!r.ok)throw new Error('HTTP '+r.status);
+      return r.json();
+    })
+    .then(function(d){
+      if(!d||d.ok===false)throw new Error('bad payload');
+      publicPoolLeads=Array.isArray(d.items)?d.items:(Array.isArray(d)?d:[]);
+      // Sort by score descending
+      publicPoolLeads.sort(function(a,b){return (parseInt(b.score||b['综合评分']||0,10))-(parseInt(a.score||a['综合评分']||0,10))});
+      publicPoolLoaded=true;
+      renderPublicPool();
+    })
+    .catch(function(e){
+      publicPoolLoaded=false;
+      if(el){
+        if(String(e&&e.message)==='UNAUTHORIZED'){
+          el.innerHTML='<div class="empty-state"><div class="es-icon">'+SIGNAL_ICON_WARN+'</div><div class="es-title">登录已过期</div><div class="es-desc">请先登录后查看公海线索。</div><div style="margin-top:14px"><a class="btn btn-primary btn-sm" href="login.html">去登录</a></div></div>';
+        }else{
+          el.innerHTML='<div class="empty-state"><div class="es-icon">'+SIGNAL_ICON_WARN+'</div><div class="es-title">公海线索加载失败</div><div class="es-desc">可能是网络异常或服务暂不可用，请重试。</div><div style="margin-top:14px"><button class="btn btn-primary btn-sm" onclick="loadPublicPool()">重试加载</button></div></div>';
+        }
+      }
+      if(stats)stats.textContent='';
+    });
+}
+
+function renderPublicPool(){
+  var el=document.getElementById('public-pool-list');
+  var stats=document.getElementById('public-pool-stats');
+  if(!el)return;
+  var claimerName=getClaimerName();
+  if(stats)stats.textContent='共 '+publicPoolLeads.length+' 条公海线索 · 按综合评分降序排列';
+  if(!publicPoolLeads.length){
+    el.innerHTML='<div class="empty-state"><div class="es-icon">'+SIGNAL_ICON_RSS+'</div><div class="es-title">暂无可认领的商机</div><div class="es-desc">系统将在每天9:00和15:00自动刷新，也可点击「搜索新线索」手动获取。</div></div>';
+    return;
+  }
+  var html=publicPoolLeads.map(function(ld){
+    var rid=ld.record_id||ld.id||'';
+    var score=parseInt(ld.score||ld['综合评分']||0,10);
+    var company=ld.company||ld['公司机构']||ld['标题']||'（未知公司）';
+    var country=ld.country||ld['国家/地区']||ld.region||'';
+    var product=ld.product||ld['需求产品']||ld['商机类型']||'';
+    var contact=ld.contact||ld['联系方式']||ld['联系邮箱']||'';
+    var isClaimed=!!(ld.claimed||ld.claimed_by);
+    var claimedBy=ld.claimed_by||'';
+    var isMine=claimedBy&&claimerName&&claimedBy===claimerName;
+    var cardClass='lead-public-card'+(isClaimed?' claimed':'');
+    var h='<div class="'+cardClass+'">';
+    // Header: score badge + company + claim tag
+    h+='<div class="lpc-header">';
+    h+=scoreBadgeHtml(score);
+    h+='<span class="lpc-company">'+esc(company)+'</span>';
+    if(country)h+='<span class="sig-region-tag">'+esc(country)+'</span>';
+    if(isClaimed){
+      h+='<span class="claim-tag">已认领 - '+esc(claimedBy)+'</span>';
+    }
+    h+='</div>';
+    // Fields
+    if(product||contact){
+      h+='<div class="lpc-fields">';
+      if(product)h+='<div><span class="lpc-field-label">需求产品：</span><span class="lpc-field-value">'+esc(product)+'</span></div>';
+      if(contact)h+='<div><span class="lpc-field-label">联系方式：</span><span class="lpc-field-value">'+esc(contact)+'</span></div>';
+      h+='</div>';
+    }
+    // Source/summary if available
+    var summary=ld.summary||ld.description||'';
+    if(summary)h+='<div style="font-size:12px;color:var(--color-text-secondary);line-height:1.6;margin:6px 0">'+esc(summary)+'</div>';
+    // Actions
+    h+='<div class="lpc-actions">';
+    if(isClaimed){
+      if(isMine){
+        h+='<button type="button" class="btn btn-primary btn-sm" onclick="switchPage(\'mycustomers\',document.querySelector(\'[data-page=mycustomers]\'))">已认领 · 去我的客户</button>';
+      }else{
+        h+='<button type="button" class="btn btn-outline btn-sm" disabled style="opacity:.55;cursor:not-allowed">已被 '+esc(claimedBy)+' 认领</button>';
+      }
+    }else{
+      h+='<button type="button" class="btn btn-primary btn-sm" onclick="claimLead(\''+esc(String(rid))+'\',this)">认领</button>';
+    }
+    h+='</div>';
+    h+='</div>';
+    return h;
+  }).join('');
+  el.innerHTML=html;
+}
+
+function claimLead(rid,btn){
+  var claimerName=getClaimerName();
+  if(!claimerName){
+    var input=prompt('请输入你的姓名（用于认领归属）：');
+    if(!input)return;
+    claimerName=input.trim();
+    localStorage.setItem('rhc_claimer_name',claimerName);
+  }
+  if(btn){btn.disabled=true;btn.textContent='认领中…'}
+  fetch('/api/leads/claim/'+encodeURIComponent(rid),{
+    method:'POST',
+    headers:Object.assign({'Content-Type':'application/json'},authHeaders()),
+    body:JSON.stringify({claimer:claimerName})
+  }).then(function(r){
+    return r.json().then(function(d){return {status:r.status,data:d}});
+  }).then(function(res){
+    if(res.status===200&&res.data&&res.data.ok){
+      showToast('认领成功，已进入「我的客户」','success');
+      loadPublicPool();
+      updateMcBadge();
+    }else if(res.status===409){
+      var by=(res.data&&res.data.claimed_by)||'他人';
+      showToast('该线索已被 '+esc(by)+' 认领','error');
+      loadPublicPool();
+    }else if(res.status===401){
+      showToast('请先登录后再认领','error');
+    }else{
+      if(btn){btn.disabled=false;btn.textContent='认领'}
+      showToast((res.data&&(res.data.message||res.data.detail))||'认领失败，请稍后重试','error');
+    }
+  }).catch(function(e){
+    if(btn){btn.disabled=false;btn.textContent='认领'}
+    showToast('网络异常，认领失败','error');
+  });
+}
+
+function loadMyCustomers(){
+  var el=document.getElementById('mc-list');
+  var stats=document.getElementById('mc-stats');
+  if(el)el.innerHTML='<div class="loading-state"><div class="spin"></div><div>正在加载我的客户…</div></div>';
+  if(stats)stats.textContent='加载中…';
+  fetch('/api/leads/my',{headers:authHeaders(),cache:'no-store'})
+    .then(function(r){
+      if(r.status===401)throw new Error('UNAUTHORIZED');
+      if(!r.ok)throw new Error('HTTP '+r.status);
+      return r.json();
+    })
+    .then(function(d){
+      if(!d||d.ok===false)throw new Error('bad payload');
+      myCustomersList=Array.isArray(d.items)?d.items:(Array.isArray(d)?d:[]);
+      // Sort by claim time descending
+      myCustomersList.sort(function(a,b){
+        var ta=a.claimed_at||a['认领时间']||'';
+        var tb=b.claimed_at||b['认领时间']||'';
+        return tb.localeCompare(ta);
+      });
+      myCustomersLoaded=true;
+      // Sync to leadsAll for backward compatibility with mail system
+      leadsAll=myCustomersList.slice();
+      leadsLoaded=true;
+      renderMyCustomers();
+      updateMcBadge();
+      renderMailCustomerOptions();
+    })
+    .catch(function(e){
+      myCustomersLoaded=false;
+      if(el){
+        if(String(e&&e.message)==='UNAUTHORIZED'){
+          el.innerHTML='<div class="empty-state"><div class="es-icon">'+SIGNAL_ICON_WARN+'</div><div class="es-title">登录已过期</div><div class="es-desc">请先登录后查看你的客户。</div><div style="margin-top:14px"><a class="btn btn-primary btn-sm" href="login.html">去登录</a></div></div>';
+        }else{
+          el.innerHTML='<div class="empty-state"><div class="es-icon">'+SIGNAL_ICON_WARN+'</div><div class="es-title">客户加载失败</div><div class="es-desc">可能是网络异常，请重试。</div><div style="margin-top:14px"><button class="btn btn-primary btn-sm" onclick="loadMyCustomers()">重试加载</button></div></div>';
+        }
+      }
+      if(stats)stats.textContent='';
+    });
+}
+
+function renderMyCustomers(){
+  var el=document.getElementById('mc-list');
+  var stats=document.getElementById('mc-stats');
+  if(!el)return;
+  if(stats)stats.textContent='共 '+myCustomersList.length+' 位客户 · 按认领时间降序';
+  if(!myCustomersList.length){
+    el.innerHTML='<div class="empty-state"><div class="es-icon">'+SIGNAL_ICON_RSS+'</div><div class="es-title">暂无客户</div><div class="es-desc">你还没有认领任何线索。去「商机信号」挑选你的第一个客户吧</div><div style="margin-top:14px"><button class="btn btn-primary btn-sm" onclick="switchPage(\'signals\',document.querySelector(\'[data-page=signals]\'))">去商机信号</button></div></div>';
+    return;
+  }
+  var html=myCustomersList.map(function(ld){
+    var rid=ld.record_id||ld.id||'';
+    var score=parseInt(ld.score||ld['综合评分']||0,10);
+    var company=ld.company||ld['公司机构']||ld['标题']||'（未知公司）';
+    var country=ld.country||ld['国家/地区']||ld.region||'';
+    var product=ld.product||ld['需求产品']||'';
+    var contact=ld.contact||ld['联系方式']||ld['联系邮箱']||'';
+    var status=ld.status||ld['状态']||'待开发';
+    var claimedAt=ld.claimed_at||ld['认领时间']||'';
+    var h='<div class="mc-card">';
+    h+='<div class="mc-header">';
+    h+=scoreBadgeHtml(score);
+    h+='<span class="mc-company">'+esc(company)+'</span>';
+    h+=mcStatusTag(status);
+    if(country)h+='<span class="sig-region-tag">'+esc(country)+'</span>';
+    h+='</div>';
+    h+='<div class="mc-fields">';
+    if(product)h+='<div><span class="lpc-field-label">需求产品：</span><span class="lpc-field-value">'+esc(product)+'</span></div>';
+    if(contact)h+='<div><span class="lpc-field-label">联系方式：</span><span class="lpc-field-value">'+esc(contact)+'</span></div>';
+    if(claimedAt)h+='<div><span class="lpc-field-label">认领时间：</span><span class="lpc-field-value">'+esc(claimedAt)+'</span></div>';
+    h+='</div>';
+    h+='<div class="mc-actions">';
+    h+='<button type="button" class="btn btn-outline btn-sm" disabled title="接入后自动开放" style="opacity:.5;cursor:not-allowed">写开发信</button>';
+    h+='<button type="button" class="btn btn-outline btn-sm" onclick="showToast(\'详情页开发中\',\'info\')">查看详情</button>';
+    h+='</div>';
+    h+='</div>';
+    return h;
+  }).join('');
+  el.innerHTML=html;
+}
+
+function updateMcBadge(){
+  var badge=document.getElementById('mc-badge');
+  if(!badge)return;
+  var n=myCustomersList.length;
+  if(n>0){
+    badge.textContent=n>99?'99+':String(n);
+    badge.style.display='inline-flex';
+  }else{
+    badge.textContent='0';
+    badge.style.display='none';
+  }
+}
+
 /* ===== Search New Leads ===== */
 function searchNewLeads() {
   var token = localStorage.getItem('rhc_auth_token');
@@ -2634,6 +2940,8 @@ function claimSearchLead(leadId) {
     card.style.opacity = '0.5';
     var actions = card.querySelector('.slc-actions');
     if (actions) actions.innerHTML = '<span style="font-size:12px;color:var(--color-success);font-weight:600">✓ 已认领跟进</span>';
+    loadPublicPool();
+    loadMyCustomers();
   })
   .catch(function() { showToast('认领失败，请重试', 'error'); });
 }

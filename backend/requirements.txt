@@ -7,3 +7,4 @@ httpx==0.26.0
 numpy==1.26.3
 rembg==2.0.56
 onnxruntime==1.18.1
+APScheduler==3.10.4

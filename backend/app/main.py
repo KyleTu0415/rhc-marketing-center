@@ -18,6 +18,7 @@ import sys
 import threading
 import uvicorn
 from datetime import datetime, timezone, timedelta
+import asyncio
 
 # Optional imports
 try:
@@ -688,6 +689,8 @@ LEADS_FIELD_MAP = {
     "联系邮箱": "联系邮箱",
     "跟进备注": "跟进备注",
     "邮箱来源": "邮箱来源",
+    "认领状态": "认领状态",
+    "综合评分": "综合评分",
 }
 LEAD_ACTIVE_STATUS = ("跟进中", "已转客户")
 LEAD_STATUS_OPTIONS = ("跟进中", "已转客户", "已释放")
@@ -729,6 +732,9 @@ def _ensure_leads_table():
         {"field_name": "联系邮箱", "type": 1},   # 文本
         {"field_name": "跟进备注", "type": 1},   # 文本
         {"field_name": "邮箱来源", "type": 1},   # 文本（智能查找采用邮箱时记录来源 URL）
+        {"field_name": "认领状态", "type": 3,    # 单选：未认领/已认领
+         "property": {"options": [{"name": "未认领"}, {"name": "已认领"}]}},
+        {"field_name": "综合评分", "type": 2},   # 数字（0-100）
     ]
     resp = _feishu_api("POST", f"/bitable/v1/apps/{FEISHU_ATK}/tables",
                        {"table": {"name": LEADS_TABLE_NAME,
@@ -760,6 +766,9 @@ LEADS_FIELDS_SCHEMA = [
     {"field_name": "联系邮箱", "type": 1},
     {"field_name": "跟进备注", "type": 1},
     {"field_name": "邮箱来源", "type": 1},
+    {"field_name": "认领状态", "type": 3,
+     "property": {"options": [{"name": "未认领"}, {"name": "已认领"}]}},
+    {"field_name": "综合评分", "type": 2},
 ]
 
 
@@ -2594,6 +2603,13 @@ def _rate_lead_quality(info: dict) -> str:
     return "C"
 
 
+async def call_coze_scoring_workflow(lead_info: dict) -> int:
+    """调用Coze工作流对线索进行多维度AI打分，返回0-100分
+    暂时用A/B/C规则兜底，待Coze工作流就绪后切换"""
+    grade = lead_info.get("confidence", "C")
+    return {"A": 90, "B": 60, "C": 30}.get(grade, 30)
+
+
 def _recommend_product(demand: str) -> str:
     """根据需求推荐RHC产品型号"""
     if "麻醉机" in demand:
@@ -2742,11 +2758,47 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
             existing_leads = []
         new_leads = _dedup_with_existing_leads(raw_leads, existing_leads)
 
-        # 3) 缓存结果
+        # 3) 对每条新线索打分并写入飞书线索表（认领状态=未认领，综合评分=分数）
+        async def _score_and_write_leads():
+            tid = _ensure_leads_table()
+            now_iso = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+            for lead in new_leads:
+                score = await call_coze_scoring_workflow(lead)
+                lead["score"] = score
+                grade = lead.get("confidence", "C")
+                fields = {
+                    "线索标题": f"{lead.get('company_name', '')}（{lead.get('country', '')}）",
+                    "商机类型": "渠道动态",
+                    "公司/机构": lead.get("company_name", ""),
+                    "摘要": (lead.get("ai_suggestion", "") or "")[:2000],
+                    "来源": lead.get("source", "DuckDuckGo搜索")[:200],
+                    "原文链接": lead.get("website", ""),
+                    "地区": f"{lead.get('region', '')} - {lead.get('country', '')}",
+                    "发布日期": now_iso[:10],
+                    "认领状态": "未认领",
+                    "认领人": "",
+                    "认领时间": "",
+                    "状态": "跟进中",
+                    "联系邮箱": "",
+                    "跟进备注": "",
+                    "邮箱来源": "",
+                    "综合评分": score,
+                }
+                try:
+                    _feishu_api(
+                        "POST",
+                        f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records",
+                        {"fields": fields})
+                except Exception as we:
+                    print(f"[search] 写入线索表失败: {we}")
+            _invalidate_leads_cache()
+        await _score_and_write_leads()
+
+        # 4) 缓存结果
         _search_results_cache["data"] = new_leads
         _search_results_cache["ts"] = time.time()
 
-        # 4) 为每条新线索自动创建消息通知（后台线程，不阻塞返回）
+        # 5) 为每条新线索自动创建消息通知（后台线程，不阻塞返回）
         if new_leads:
             def _create_messages():
                 try:
@@ -2761,7 +2813,7 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
                             f"国家: {lead['country']} | 地区: {lead['region']}\n"
                             f"需求: {lead['product_demand']}\n"
                             f"推荐产品: {lead['recommended_product']}\n"
-                            f"质量评级: {grade}级\n"
+                            f"质量评级: {grade}级 | 综合评分: {lead.get('score', 0)}\n"
                             f"官网: {lead.get('website', '未知')}\n"
                             f"跟进建议: {lead.get('ai_suggestion', '')}"
                         )
@@ -3076,6 +3128,150 @@ async def api_messages_create(req: CreateMessageRequest, request: Request):
     except Exception as e:
         print(f"[messages] 创建消息失败: {e}")
         return JSONResponse({"ok": False, "message": f"创建消息失败：{e}"}, status_code=502)
+
+# ============================================================
+# 公海池/私海池 API + 定时搜索任务
+# ============================================================
+
+class ClaimByRecordRequest(BaseModel):
+    claimer: str = ""
+
+
+@app.get("/api/leads/public")
+async def api_leads_public(request: Request):
+    """公海池：返回全部线索（含已认领的），按综合评分降序。需JWT认证。"""
+    token = _get_token_from_request(request)
+    if not token or not _verify_token(token):
+        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    try:
+        leads = _fetch_leads(force_refresh=True)
+        leads.sort(key=lambda x: float(x.get("综合评分") or 0), reverse=True)
+        return {"ok": True, "items": leads, "stats": {"total": len(leads)}}
+    except Exception as e:
+        print(f"[leads] 公海池读取失败: {e}")
+        return JSONResponse({"ok": False, "message": f"读取公海池失败：{e}"}, status_code=502)
+
+
+@app.get("/api/leads/my")
+async def api_leads_my(request: Request):
+    """私海池：返回当前销售认领的线索，按认领时间降序。需JWT认证。"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info:
+        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    # 优先从请求头取销售ID，其次从JWT
+    sales_id = request.headers.get("X-Sales-Id", "").strip()
+    if not sales_id:
+        sales_id = user_info.get("name", "") or user_info.get("username", "")
+    if not sales_id:
+        return {"ok": True, "items": [], "stats": {"total": 0}}
+    try:
+        leads = _fetch_leads(force_refresh=True)
+        my_leads = [l for l in leads if (l.get("认领人") or "").strip() == sales_id and l.get("认领状态") == "已认领"]
+        my_leads.sort(key=lambda x: x.get("认领时间", ""), reverse=True)
+        return {"ok": True, "items": my_leads, "stats": {"total": len(my_leads)}}
+    except Exception as e:
+        print(f"[leads] 私海池读取失败: {e}")
+        return JSONResponse({"ok": False, "message": f"读取私海池失败：{e}"}, status_code=502)
+
+
+@app.post("/api/leads/claim/{record_id}")
+async def api_leads_claim_by_record(record_id: str, req: ClaimByRecordRequest, request: Request):
+    """公海池认领线索（先到先得）。需JWT认证。"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info:
+        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    claimer = (req.claimer or "").strip()
+    if not claimer:
+        claimer = user_info.get("name", "") or user_info.get("username", "")
+    if not claimer:
+        return JSONResponse({"ok": False, "message": "缺少认领人信息，请在请求体传入claimer字段"}, status_code=400)
+    try:
+        tid = _ensure_leads_table()
+        # 先查当前线索状态
+        resp = _feishu_api("GET", f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records/{record_id}")
+        rec = resp.get("data", {}).get("record", {})
+        fields = rec.get("fields", {})
+        current_status = _tv(fields.get("认领状态"))
+        current_claimer = _tv(fields.get("认领人"))
+        if current_status == "已认领" and current_claimer:
+            return JSONResponse({"ok": False, "error": f"已被{current_claimer}认领"}, status_code=409)
+        # 未认领，执行认领
+        now_iso = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+        _feishu_api(
+            "PUT",
+            f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records/{record_id}",
+            {"fields": {"认领状态": "已认领", "认领人": claimer, "认领时间": now_iso}})
+        _invalidate_leads_cache()
+        return {"ok": True, "message": f"已成功认领线索", "claimer": claimer, "claim_time": now_iso}
+    except Exception as e:
+        print(f"[leads] 认领失败（{record_id}）: {e}")
+        return JSONResponse({"ok": False, "message": f"认领失败：{e}"}, status_code=502)
+
+
+async def _scheduled_leads_search():
+    """定时任务：每天9:00/15:00自动搜索线索并写入公海池"""
+    print(f"[scheduler] 定时搜索开始: {datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')}")
+    try:
+        raw_leads = _run_lead_search(max_results=30)
+        try:
+            existing_leads = _fetch_leads(force_refresh=True)
+        except Exception:
+            existing_leads = []
+        new_leads = _dedup_with_existing_leads(raw_leads, existing_leads)
+        if not new_leads:
+            print("[scheduler] 本轮搜索无新线索")
+            return
+        tid = _ensure_leads_table()
+        now_iso = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+        written = 0
+        for lead in new_leads:
+            score = await call_coze_scoring_workflow(lead)
+            lead["score"] = score
+            fields = {
+                "线索标题": f"{lead.get('company_name', '')}（{lead.get('country', '')}）",
+                "商机类型": "渠道动态",
+                "公司/机构": lead.get("company_name", ""),
+                "摘要": (lead.get("ai_suggestion", "") or "")[:2000],
+                "来源": lead.get("source", "DuckDuckGo搜索")[:200],
+                "原文链接": lead.get("website", ""),
+                "地区": f"{lead.get('region', '')} - {lead.get('country', '')}",
+                "发布日期": now_iso[:10],
+                "认领状态": "未认领",
+                "认领人": "",
+                "认领时间": "",
+                "状态": "跟进中",
+                "联系邮箱": "",
+                "跟进备注": "",
+                "邮箱来源": "",
+                "综合评分": score,
+            }
+            try:
+                _feishu_api("POST", f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records", {"fields": fields})
+                written += 1
+            except Exception as we:
+                print(f"[scheduler] 写入线索失败: {we}")
+        _invalidate_leads_cache()
+        print(f"[scheduler] 定时搜索完成，新增 {written}/{len(new_leads)} 条线索")
+    except Exception as e:
+        print(f"[scheduler] 定时搜索异常: {e}")
+
+
+@app.on_event("startup")
+async def startup_scheduler():
+    """启动APScheduler定时任务"""
+    try:
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+        from apscheduler.triggers.cron import CronTrigger
+        scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
+        scheduler.add_job(_scheduled_leads_search, CronTrigger(hour=9, minute=0), id="leads_search_9am")
+        scheduler.add_job(_scheduled_leads_search, CronTrigger(hour=15, minute=0), id="leads_search_3pm")
+        scheduler.start()
+        print("[scheduler] APScheduler 已启动，定时任务: 每天 09:00 / 15:00 北京时间")
+    except Exception as e:
+        print(f"[scheduler] APScheduler 启动失败: {e}")
+
 
 # 启动时后台预热飞书「系统账号」表（建表+种子数据），不阻塞服务启动
 threading.Thread(target=_warmup_account_table, daemon=True).start()
