@@ -5078,11 +5078,11 @@ async def api_cleanup_all_leads(request: Request):
     all_records = []
     page_token = ""
     while True:
-        params = {"page_size": 100}
+        path = f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records?page_size=100"
         if page_token:
-            params["page_token"] = page_token
+            path += f"&page_token={page_token}"
         try:
-            resp = _feishu_api("GET", f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records", params=params)
+            resp = _feishu_api("GET", path)
             items = resp.get("data", {}).get("items", [])
             all_records.extend(items)
             has_more = resp.get("data", {}).get("has_more", False)
