@@ -2610,29 +2610,29 @@ _RHC_PRODUCTS = [
 # ===== 精准搜索：指定行业网站清单（已验证真实有效） =====
 # 分优先级：展会参展商 > 行业协会 > B2B平台
 _TARGET_SITES = [
-    # 第一优先级：展会参展商目录（最精准的客户/经销商线索）
+    # 第一优先级：展会参展商目录（只搜参展商名录页面，避免搜到活动/联系页）
     {"domain": "navc.com", "name": "VMX Expo", "type": "展会",
-     "keywords": ["exhibitor", "veterinary", "partner"]},
+     "keywords": ["exhibitor profile", "company profile", "booth"]},
     {"domain": "london.vetshow.com", "name": "London Vet Show", "type": "展会",
-     "keywords": ["exhibitor", "veterinary", "sponsor"]},
+     "keywords": ["exhibitor profile", "company", "sponsor profile"]},
     {"domain": "westernveterinaryconference.com", "name": "Western Veterinary Conference", "type": "展会",
-     "keywords": ["exhibitor", "veterinary", "partner"]},
-    # 第二优先级：行业协会（会员名录含宠物医院/兽医）
+     "keywords": ["exhibitor profile", "company profile"]},
+    # 第二优先级：行业协会/平台（会员名录含宠物医院/兽医）
     {"domain": "aaha.org", "name": "AAHA", "type": "协会",
-     "keywords": ["member hospital", "find a hospital", "accredited"]},
+     "keywords": ["find a hospital", "accredited hospital", "member hospital"]},
     {"domain": "avma.org", "name": "AVMA", "type": "协会",
-     "keywords": ["veterinarian directory", "member", "find a vet"]},
+     "keywords": ["find a veterinarian", "member practice", "accredited"]},
     {"domain": "wsava.org", "name": "WSAVA", "type": "协会",
-     "keywords": ["member association", "veterinary", "committee"]},
+     "keywords": ["member association", "member society", "committee member"]},
     {"domain": "vetfolio.com", "name": "VetFolio", "type": "协会/平台",
-     "keywords": ["veterinary", "clinics", "practice"]},
+     "keywords": ["veterinary practice", "animal hospital", "clinic"]},
     {"domain": "vetlexicon.com", "name": "Vetlexicon", "type": "协会/平台",
-     "keywords": ["veterinary", "contributor", "partner"]},
+     "keywords": ["veterinary", "contributor", "partner clinic"]},
     # 第三优先级：B2B平台（经销商/买家聚集）
     {"domain": "medicalexpo.com", "name": "MedicalExpo", "type": "B2B",
      "keywords": ["veterinary", "animal health", "manufacturer", "distributor"]},
     {"domain": "kompass.com", "name": "Kompass", "type": "B2B",
-     "keywords": ["veterinary equipment", "animal health", "medical device"]},
+     "keywords": ["veterinary equipment", "animal health", "medical device distributor"]},
 ]
 
 _search_results_cache = {"data": None, "ts": 0.0}
@@ -3055,12 +3055,24 @@ _NON_COMPANY_TITLE_PREFIXES = (
     "exhibitor directory", "sponsor ", "become a", "apply ", "submission",
     "schedule", "agenda", "program", "welcome to", "home -", "homepage",
 )
+# 非公司主体页面的标题关键词（出现在标题任意位置即过滤）
+_NON_COMPANY_TITLE_KEYWORDS = (
+    "exhibitor information", "exhibitor service", "exhibitor resources",
+    "exhibitor success", "exhibitor warning", "exhibitor rules",
+    "partner pr opportunities", "expo hall", "events archives",
+    "industry partners supporting", "support veterinary education",
+    "continuing education", "skillshop", "overview vmx",
+    "new trends in veterinary", "trust your veterinary",
+    "north american veterinary community",
+)
 
 
 def _is_non_company_title(title: str) -> bool:
     """判断标题是否不是公司主体页面（展会联系页、活动页、目录页等）。"""
     low = title.lower().strip()
-    return any(low.startswith(p) for p in _NON_COMPANY_TITLE_PREFIXES)
+    if any(low.startswith(p) for p in _NON_COMPANY_TITLE_PREFIXES):
+        return True
+    return any(kw in low for kw in _NON_COMPANY_TITLE_KEYWORDS)
 
 
 def _rate_lead_quality(info: dict) -> str:
