@@ -3650,6 +3650,8 @@ def _run_lead_search(max_results: int = 30) -> list:
     seen_companies = set()
     dirty_dropped = 0  # 脏公司名（搜索词短语）被过滤的条数
     seller_dropped = 0  # 同行卖家货架页被过滤的条数
+    # 搜索引擎名称（用于来源字段）
+    engine_name = "Brave搜索" if use_brave else "DuckDuckGo搜索"
     for r in all_raw:
         # 电商货架/购物路径（如 /product-category/...）是同行卖家商品页，不是买家主体，丢弃
         if _is_seller_or_section_url(r.get("url", "")):
@@ -3679,7 +3681,7 @@ def _run_lead_search(max_results: int = 30) -> list:
             "email": "",
             "phone": "",
             "whatsapp": "",
-            "source": f"DuckDuckGo搜索: {r.get('_query', '')[:60]}",
+            "source": f"{engine_name}: {r.get('_query', '')[:60]}",
             "confidence": grade,
             "ai_suggestion": "",
         }
