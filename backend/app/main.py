@@ -2610,14 +2610,7 @@ _RHC_PRODUCTS = [
 # ===== 精准搜索：指定行业网站清单（已验证真实有效） =====
 # 分优先级：展会参展商 > 行业协会 > B2B平台
 _TARGET_SITES = [
-    # 第一优先级：展会参展商目录（只搜参展商名录页面，避免搜到活动/联系页）
-    {"domain": "navc.com", "name": "VMX Expo", "type": "展会",
-     "keywords": ["exhibitor profile", "company profile", "booth"]},
-    {"domain": "london.vetshow.com", "name": "London Vet Show", "type": "展会",
-     "keywords": ["exhibitor profile", "company", "sponsor profile"]},
-    {"domain": "westernveterinaryconference.com", "name": "Western Veterinary Conference", "type": "展会",
-     "keywords": ["exhibitor profile", "company profile"]},
-    # 第二优先级：行业协会/平台（会员名录含宠物医院/兽医）
+    # 行业协会/平台（会员名录含宠物医院/兽医）
     {"domain": "aaha.org", "name": "AAHA", "type": "协会",
      "keywords": ["find a hospital", "accredited hospital", "member hospital"]},
     {"domain": "avma.org", "name": "AVMA", "type": "协会",
@@ -2628,7 +2621,7 @@ _TARGET_SITES = [
      "keywords": ["veterinary practice", "animal hospital", "clinic"]},
     {"domain": "vetlexicon.com", "name": "Vetlexicon", "type": "协会/平台",
      "keywords": ["veterinary", "contributor", "partner clinic"]},
-    # 第三优先级：B2B平台（经销商/买家聚集）
+    # B2B平台（经销商/买家聚集）
     {"domain": "medicalexpo.com", "name": "MedicalExpo", "type": "B2B",
      "keywords": ["veterinary", "animal health", "manufacturer", "distributor"]},
     {"domain": "kompass.com", "name": "Kompass", "type": "B2B",
@@ -3064,6 +3057,9 @@ _NON_COMPANY_TITLE_KEYWORDS = (
     "continuing education", "skillshop", "overview vmx",
     "new trends in veterinary", "trust your veterinary",
     "north american veterinary community",
+    # 展会官网泛页面（不是参展商公司）
+    "exhibitors", "exhibitor list", "exhibitor directory",
+    "press release", "career advice", "newsroom",
 )
 
 
