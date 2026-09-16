@@ -2904,6 +2904,45 @@ def _is_seller_or_section_url(url: str) -> bool:
     return any(mark in u for mark in _SELLER_PATH_MARKS)
 
 
+
+# ===== 假线索识别规则（优化2） =====
+_FAKE_LEAD_PATTERNS = [
+    # 市场报告类
+    re.compile(r"market\s*size", re.I),
+    re.compile(r"market\s+growth", re.I),
+    re.compile(r"growth\s*\[?\s*20\d{2}", re.I),
+    # 新闻稿/发货类
+    re.compile(r"delivered\s+to", re.I),
+    re.compile(r"shipped\s+to", re.I),
+    # 二手设备类
+    re.compile(r"used\s+equipment", re.I),
+    re.compile(r"second[\s\-]hand", re.I),
+    # 预测报告类（未来年份 + Growth/Forecast）
+    re.compile(r"(203[0-9]|202[6-9]).{0,15}(growth|forecast|projection)", re.I),
+    re.compile(r"(growth|forecast|projection).{0,15}(203[0-9]|202[6-9])", re.I),
+]
+
+# 标题长度检测关键词（优化3）
+_TITLE_PRODUCT_KEYWORDS = re.compile(
+    r"\b(anesthe[sz]ia|ventilat|monitor|surgical|equipment|device|instrument|apparatus)\b",
+    re.I
+)
+
+def _is_fake_lead_title(title: str) -> bool:
+    """检查标题是否匹配假线索模式（市场报告/新闻稿/二手设备/预测报告）。
+    返回 True 表示是假线索，应丢弃或标低分。"""
+    if not title:
+        return False
+    return any(p.search(title) for p in _FAKE_LEAD_PATTERNS)
+
+
+def _is_long_title_product_page(title: str) -> bool:
+    """标题长度 > 50 字符且包含产品关键词 → 大概率是新闻稿/产品页，标低分。"""
+    if not title or len(title) <= 50:
+        return False
+    return bool(_TITLE_PRODUCT_KEYWORDS.search(title))
+
+
 def _extract_company_info(title: str, snippet: str, url: str) -> dict:
     """从搜索结果中提取公司信息"""
     text = f"{title} {snippet}".lower()
@@ -3566,6 +3605,24 @@ def _run_lead_search(max_results: int = 30) -> list:
         if i < max_queries - 1:
             time.sleep(gap)
 
+    # ===== 优化1：内部去重（按公司名，保留第一条） =====
+    _internal_seen_companies = set()
+    _internal_dedup_drop = 0
+    _deduped_raw = []
+    for r in all_raw:
+        _title = r.get("title", "")
+        # 复用 _extract_company_info 的公司名提取逻辑（取标题第一段）
+        _raw_company = _title.split("|")[0].split("-")[0].split(",")[0].split("–")[0].strip()
+        _company_key = _raw_company.lower().strip()
+        if not _company_key or _company_key in _internal_seen_companies:
+            _internal_dedup_drop += 1
+            continue
+        _internal_seen_companies.add(_company_key)
+        _deduped_raw.append(r)
+    if _internal_dedup_drop > 0:
+        print(f"[search] 内部去重: 原始{len(all_raw)}条 → 去重后{len(_deduped_raw)}条（丢弃{_internal_dedup_drop}条重复公司名）")
+    all_raw = _deduped_raw
+
     # 提取公司信息
     leads = []
     seen_companies = set()
@@ -3605,6 +3662,22 @@ def _run_lead_search(max_results: int = 30) -> list:
             "ai_suggestion": "",
         }
         lead["ai_suggestion"] = _generate_ai_suggestion(lead)
+
+        # ===== 优化2：假线索过滤 =====
+        _raw_title = r.get("title", "")
+        if _is_fake_lead_title(_raw_title):
+            lead["_score_penalty"] = True
+            lead["score"] = 3  # 假线索直接标极低分
+            lead["confidence"] = "C"
+            lead["_fake_reason"] = "fake_title_pattern"
+
+        # ===== 优化3：标题长度检测 =====
+        if _is_long_title_product_page(_raw_title):
+            lead["_score_penalty"] = True
+            lead["score"] = 8  # 长标题+产品词 → 新闻稿/产品页
+            lead["confidence"] = "C"
+            lead["_long_title_reason"] = "long_title_product_page"
+
         leads.append(lead)
         if len(leads) >= max_results:
             break
@@ -3680,8 +3753,13 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
         now_iso = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
         leads_with_record_ids = []
         for lead in new_leads:
-            score = await call_coze_scoring_workflow(lead)
-            lead["score"] = score
+            # 优化2&3：假线索/长标题产品页直接低分，跳过 Coze 评分节省调用
+            if lead.get("_score_penalty"):
+                score = lead.get("score", 5)
+                print(f"[search] 假线索/长标题跳过评分: {lead.get('company_name','')[:30]} → {score}分")
+            else:
+                score = await call_coze_scoring_workflow(lead)
+                lead["score"] = score
             fields = {
                 "线索标题": f"{lead.get('company_name', '')}（{lead.get('country', '')}）",
                 "商机类型": "渠道动态",
@@ -4884,8 +4962,12 @@ async def _scheduled_leads_search():
         written = 0
         leads_with_record_ids = []
         for lead in new_leads:
-            score = await call_coze_scoring_workflow(lead)
-            lead["score"] = score
+            # 优化2&3：假线索/长标题产品页直接低分，跳过 Coze 评分节省调用
+            if lead.get("_score_penalty"):
+                score = lead.get("score", 5)
+            else:
+                score = await call_coze_scoring_workflow(lead)
+                lead["score"] = score
             fields = {
                 "线索标题": f"{lead.get('company_name', '')}（{lead.get('country', '')}）",
                 "商机类型": "渠道动态",

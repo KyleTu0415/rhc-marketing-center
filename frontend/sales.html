@@ -2755,6 +2755,10 @@ var myCustomersLoaded=false;
 var publicPoolCache=null;  // {items: [...], timestamp: Date}
 var publicPoolPollTimer=null;  // 补搜轮询定时器
 var enrichmentPollGraceUntil=0; // 手动搜索后的补搜观察宽限截止时间戳（ms）
+/* 优化4：补全操作30秒锁定（防多人同时补全同一条） */
+var _enrichLocks={}; // {rid: unlockTimestamp}
+function isEnrichLocked(rid){var ts=_enrichLocks[rid];return ts&&Date.now()<ts;}
+function setEnrichLock(rid,ms){_enrichLocks[rid]=Date.now()+(ms||30000);}
 var PUBLIC_POOL_CACHE_TTL=5*60*1000; // 5分钟
 var myCustomersCache=null;  // {items: [...], timestamp: Date} 私海5分钟内存缓存（v2.1）
 var MY_CUSTOMERS_CACHE_TTL=5*60*1000;
@@ -2811,7 +2815,18 @@ function loadPublicPool(forceRefresh){
       if(!d||d.ok===false)throw new Error('bad payload');
       publicPoolLeads=Array.isArray(d.items)?d.items:(Array.isArray(d)?d:[]);
       // Sort by score descending
-      publicPoolLeads.sort(function(a,b){return (parseInt(b.score||b['综合评分']||0,10))-(parseInt(a.score||a['综合评分']||0,10))});
+      /* 优化5：已认领线索位置锁定，仅未认领线索按评分排序 */
+        (function(){
+          var claimed=[],unclaimed=[];
+          for(var i=0;i<publicPoolLeads.length;i++){
+            var l=publicPoolLeads[i];
+            var cs=l['认领状态']||l.claim_status||'';
+            var cb=l['认领人']||l.claimer||l.claimed_by||'';
+            if(cs==='已认领'||cb)claimed.push(l);else unclaimed.push(l);
+          }
+          unclaimed.sort(function(a,b){return (parseInt(b.score||b['综合评分']||0,10))-(parseInt(a.score||a['综合评分']||0,10))});
+          publicPoolLeads=claimed.concat(unclaimed);
+        })();
       publicPoolLoaded=true;
       // 写入缓存
       publicPoolCache={items:publicPoolLeads.slice(),timestamp:Date.now()};
@@ -3033,6 +3048,13 @@ function buildEnrichButtonHtml(rid,status){
   if(status==='已深度补全'){
     return '<button type="button" class="btn-enrich btn-enrich-done" disabled>✓ 信息完整</button>';
   }
+  /* 优化4：30秒锁定态 */
+  if(isEnrichLocked(rid)){
+    return '<button type="button" class="btn-enrich" disabled style="opacity:.6;cursor:not-allowed"><span class="enrich-spinner"></span> 补全中(锁定)…</button>';
+  }
+  if(status==='轻补搜中'||status==='深度补搜中'){
+    return '<button type="button" class="btn-enrich" disabled style="opacity:.6;cursor:not-allowed"><span class="enrich-spinner"></span> 补全中…</button>';
+  }
   if(status==='已检索·未找到联系方式'){
     return '<button type="button" class="btn-enrich" id="enrich-btn-'+esc(String(rid))+'" onclick="enrichLead(\''+esc(String(rid))+'\',this)">↻ 重新检索</button>';
   }
@@ -3041,9 +3063,16 @@ function buildEnrichButtonHtml(rid,status){
 /* 补全信息：POST /api/leads/{record_id}/enrich */
 function enrichLead(rid,btn){
   if(!rid)return;
+  /* 优化4：30秒锁定检查 */
+  if(isEnrichLocked(rid)){
+    showToast('该线索正在被其他销售补全中，请30秒后再试','warn');
+    return;
+  }
+  setEnrichLock(rid,30000); // 立即锁定30秒
   if(btn){btn.disabled=true;btn.innerHTML='<span class="enrich-spinner"></span> 补全中…'}
   function resetBtn(){
     if(btn){btn.disabled=false;btn.innerHTML='🔍 补全信息';}
+    delete _enrichLocks[rid]; // 失败时释放锁
   }
   // 前端40秒硬超时：后端深度补全已限25秒，留余量；超时不再无限转圈
   var ctrl=null,timer=null;
@@ -3104,7 +3133,18 @@ function startEnrichmentPolling(){
       .then(function(d){
         if(!d||d.ok===false)return;
         publicPoolLeads=Array.isArray(d.items)?d.items:(Array.isArray(d)?d:[]);
-        publicPoolLeads.sort(function(a,b){return (parseInt(b.score||b['综合评分']||0,10))-(parseInt(a.score||a['综合评分']||0,10))});
+        /* 优化5：已认领线索位置锁定，仅未认领线索按评分排序 */
+        (function(){
+          var claimed=[],unclaimed=[];
+          for(var i=0;i<publicPoolLeads.length;i++){
+            var l=publicPoolLeads[i];
+            var cs=l['认领状态']||l.claim_status||'';
+            var cb=l['认领人']||l.claimer||l.claimed_by||'';
+            if(cs==='已认领'||cb)claimed.push(l);else unclaimed.push(l);
+          }
+          unclaimed.sort(function(a,b){return (parseInt(b.score||b['综合评分']||0,10))-(parseInt(a.score||a['综合评分']||0,10))});
+          publicPoolLeads=claimed.concat(unclaimed);
+        })();
         publicPoolCache={items:publicPoolLeads.slice(),timestamp:Date.now()};
         renderPublicPool();
         // 有补搜在跑则继续；没有时，仅在手动搜索宽限窗口内继续观察，窗口结束即停
