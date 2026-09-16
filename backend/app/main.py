@@ -5053,25 +5053,6 @@ threading.Thread(target=_warmup_emails_table, daemon=True).start()
 
 
 
-# Serve frontend - try multiple possible locations
-_candidate_dirs = [
-    os.path.join(os.path.dirname(__file__), "frontend"),                              # Railway root=backend/: /app/frontend
-    os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend"),              # Railway root=repo: /backend/frontend
-    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "frontend"),  # extra fallback
-]
-static_dir = None
-for _d in _candidate_dirs:
-    if os.path.isdir(_d):
-        static_dir = _d
-        break
-# Serve generated uploads (transparent PNGs etc.) as static files
-_uploads_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
-os.makedirs(_uploads_dir, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=_uploads_dir), name="uploads")
-
-if static_dir:
-    app.mount("/", StaticFiles(directory=static_dir, html=True), name="frontend")
-
 # ============================================================
 # 临时清理接口（用完即删）：备份全量线索 → 删除所有线索
 # 密钥：rhc-clean-2026-0916
@@ -5140,6 +5121,26 @@ async def api_cleanup_all_leads(request: Request):
         return {"ok": True, "action": "delete", "deleted": deleted, "backup": backup_file}
     
     return JSONResponse({"ok": False, "message": "未知 action"}, status_code=400)
+
+
+# Serve frontend - try multiple possible locations
+_candidate_dirs = [
+    os.path.join(os.path.dirname(__file__), "frontend"),                              # Railway root=backend/: /app/frontend
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend"),              # Railway root=repo: /backend/frontend
+    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "frontend"),  # extra fallback
+]
+static_dir = None
+for _d in _candidate_dirs:
+    if os.path.isdir(_d):
+        static_dir = _d
+        break
+# Serve generated uploads (transparent PNGs etc.) as static files
+_uploads_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
+os.makedirs(_uploads_dir, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=_uploads_dir), name="uploads")
+
+if static_dir:
+    app.mount("/", StaticFiles(directory=static_dir, html=True), name="frontend")
 
 
 if __name__ == "__main__":
