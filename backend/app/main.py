@@ -2898,10 +2898,27 @@ _SELLER_PATH_MARKS = (
     "/item/", "/goods/", "/categoria/", "/categorias/", "/produto/", "/produtos/",
 )
 
+# 子域名中的电商/产品站特征（如 products.covetrus.com, shop.example.com）
+_SELLER_SUBDOMAIN_MARKS = (
+    "products.", "shop.", "store.", "catalog.", "catalogue.", "ecommerce.", "ecom.",
+)
+
 
 def _is_seller_or_section_url(url: str) -> bool:
     u = (url or "").lower().split("?")[0].rstrip("/")
-    return any(mark in u for mark in _SELLER_PATH_MARKS)
+    # 检查路径
+    if any(mark in u for mark in _SELLER_PATH_MARKS):
+        return True
+    # 检查子域名（如 products.covetrus.com）
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(u)
+        domain = parsed.netloc.lower()
+        if any(domain.startswith(mark) for mark in _SELLER_SUBDOMAIN_MARKS):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 
@@ -3613,6 +3630,11 @@ def _run_lead_search(max_results: int = 30) -> list:
         _title = r.get("title", "")
         # 复用 _extract_company_info 的公司名提取逻辑（取标题第一段）
         _raw_company = _title.split("|")[0].split("-")[0].split(",")[0].split("–")[0].strip()
+        # 去掉通用词（与 _extract_company_info 保持一致）
+        for word in ["veterinary", "animal", "hospital", "equipment", "supplier",
+                      "importer", "distributor", "wholesale", "official"]:
+            _raw_company = _raw_company.replace(word, " ").strip()
+        _raw_company = re.sub(r'\s+', ' ', _raw_company).strip()
         _company_key = _raw_company.lower().strip()
         if not _company_key or _company_key in _internal_seen_companies:
             _internal_dedup_drop += 1
