@@ -2607,14 +2607,52 @@ _RHC_PRODUCTS = [
     "RHC-SE200 兽用手术设备", "RHC-AH 动物医院整体方案",
 ]
 
+# ===== 精准搜索：指定行业网站清单（已验证真实有效） =====
+# 分优先级：展会参展商 > 行业协会 > B2B平台
+_TARGET_SITES = [
+    # 第一优先级：展会参展商目录（最精准的客户/经销商线索）
+    {"domain": "navc.com", "name": "VMX Expo", "type": "展会",
+     "keywords": ["exhibitor", "veterinary", "partner"]},
+    {"domain": "london.vetshow.com", "name": "London Vet Show", "type": "展会",
+     "keywords": ["exhibitor", "veterinary", "sponsor"]},
+    {"domain": "westernveterinaryconference.com", "name": "Western Veterinary Conference", "type": "展会",
+     "keywords": ["exhibitor", "veterinary", "partner"]},
+    # 第二优先级：行业协会（会员名录含宠物医院/兽医）
+    {"domain": "aaha.org", "name": "AAHA", "type": "协会",
+     "keywords": ["member hospital", "find a hospital", "accredited"]},
+    {"domain": "avma.org", "name": "AVMA", "type": "协会",
+     "keywords": ["veterinarian directory", "member", "find a vet"]},
+    {"domain": "wsava.org", "name": "WSAVA", "type": "协会",
+     "keywords": ["member association", "veterinary", "committee"]},
+    {"domain": "vetfolio.com", "name": "VetFolio", "type": "协会/平台",
+     "keywords": ["veterinary", "clinics", "practice"]},
+    {"domain": "vetlexicon.com", "name": "Vetlexicon", "type": "协会/平台",
+     "keywords": ["veterinary", "contributor", "partner"]},
+    # 第三优先级：B2B平台（经销商/买家聚集）
+    {"domain": "medicalexpo.com", "name": "MedicalExpo", "type": "B2B",
+     "keywords": ["veterinary", "animal health", "manufacturer", "distributor"]},
+    {"domain": "kompass.com", "name": "Kompass", "type": "B2B",
+     "keywords": ["veterinary equipment", "animal health", "medical device"]},
+]
+
 _search_results_cache = {"data": None, "ts": 0.0}
 _SEARCH_CACHE_TTL = 30  # 搜索结果30秒缓存
 
 
 def _build_search_queries():
-    """构建搜索词列表：产品关键词 + 目标市场 + importer/distributor/hospital"""
+    """构建搜索词列表：
+    优先使用 site: 限定行业网站精准搜索，再用通用搜索兜底。
+    策略：展会参展商 > 行业协会 > B2B平台 > 通用搜索"""
     queries = []
-    # 每个产品关键词 + 每个目标市场 组合太多，选取代表性组合
+
+    # ===== 第一阶段：指定网站精准搜索（site: 语法） =====
+    for site in _TARGET_SITES:
+        domain = site["domain"]
+        for kw in site["keywords"]:
+            queries.append(f'site:{domain} {kw}')
+
+    # ===== 第二阶段：行业关键词 + 目标市场（通用搜索） =====
+    # 产品关键词 + 目标市场 + importer/distributor
     for product in _SEARCH_PRODUCTS[:3]:  # 取前3个核心产品
         for country in list(_SEARCH_COUNTRIES.keys())[:8]:  # 每轮取8个市场
             queries.append(f'"{product}" importer {country}')
@@ -3599,7 +3637,7 @@ def _run_lead_search(max_results: int = 30) -> list:
     # 控制搜索轮次与节奏：Brave 免费档 1 QPS，轮次太多既慢又耗额度；
     # 免费回退(DDG)在机房第2个查询起即被限流，多发也无意义。
     use_brave = bool(os.environ.get("BRAVE_API_KEY", "").strip())
-    max_queries = min(len(queries), 10 if use_brave else 8)
+    max_queries = min(len(queries), 20 if use_brave else 12)
     gap = 1.1 if use_brave else 0.5
     for i, query in enumerate(queries[:max_queries]):
         results = _search_ddg_leads(query, timeout=8 if use_brave else 6)
