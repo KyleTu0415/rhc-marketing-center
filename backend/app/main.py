@@ -3048,6 +3048,21 @@ def _extract_company_info(title: str, snippet: str, url: str) -> dict:
     }
 
 
+# 非公司主体页面的标题特征（展会联系页、活动页、目录页等）
+_NON_COMPANY_TITLE_PREFIXES = (
+    "contact ", "contact our", "about ", "find a", "find your", "join ",
+    "register ", "sign up", "login", "log in", "exhibitor list",
+    "exhibitor directory", "sponsor ", "become a", "apply ", "submission",
+    "schedule", "agenda", "program", "welcome to", "home -", "homepage",
+)
+
+
+def _is_non_company_title(title: str) -> bool:
+    """判断标题是否不是公司主体页面（展会联系页、活动页、目录页等）。"""
+    low = title.lower().strip()
+    return any(low.startswith(p) for p in _NON_COMPANY_TITLE_PREFIXES)
+
+
 def _rate_lead_quality(info: dict) -> str:
     """质量评级：A=明确进口/采购+目标市场匹配，B=动物医院+目标市场，C=其他"""
     if info.get("is_importer") and info.get("country"):
@@ -3688,12 +3703,17 @@ def _run_lead_search(max_results: int = 30) -> list:
     seen_companies = set()
     dirty_dropped = 0  # 脏公司名（搜索词短语）被过滤的条数
     seller_dropped = 0  # 同行卖家货架页被过滤的条数
+    non_company_dropped = 0  # 非公司主体页面（展会联系页/活动页）被过滤的条数
     # 搜索引擎名称（用于来源字段）
     engine_name = "Brave搜索" if use_brave else "DuckDuckGo搜索"
     for r in all_raw:
         # 电商货架/购物路径（如 /product-category/...）是同行卖家商品页，不是买家主体，丢弃
         if _is_seller_or_section_url(r.get("url", "")):
             seller_dropped += 1
+            continue
+        # 展会联系页/活动页/目录页等非公司主体页面，丢弃
+        if _is_non_company_title(r.get("title", "")):
+            non_company_dropped += 1
             continue
         info = _extract_company_info(r["title"], r.get("snippet", ""), r["url"])
         if not info["company_name"] or len(info["company_name"]) < 3:
@@ -3750,6 +3770,7 @@ def _run_lead_search(max_results: int = 30) -> list:
     _lead_search_diag["ts"] = time.time()
     print(f"[search] 搜索诊断: 查询{min(len(queries), max_queries)}轮, "
           f"原始结果{len(all_raw)}条, 脏名过滤{dirty_dropped}条, 卖家页过滤{seller_dropped}条, "
+          f"非公司页过滤{non_company_dropped}条, "
           f"有效线索{len(leads)}条, "
           f"连续空轮次{empty_rounds}, 引擎状态={_lead_search_diag['engine_status']}, "
           f"命中引擎={_lead_search_diag['last_ok_engine'] or '无'}"
@@ -3760,6 +3781,7 @@ def _run_lead_search(max_results: int = 30) -> list:
             "raw_results": len(all_raw),
             "dirty_dropped": dirty_dropped,
             "seller_dropped": seller_dropped,
+            "non_company_dropped": non_company_dropped,
             "valid_leads": len(leads),
             "empty_rounds": empty_rounds,
             "engine_status": dict(_lead_search_diag["engine_status"]),
@@ -3815,12 +3837,22 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
         now_iso = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
         leads_with_record_ids = []
         for lead in new_leads:
-            # 优化2&3：假线索/长标题产品页直接低分，跳过 Coze 评分节省调用
+            # 先用规则兜底分（Coze 评分改到后台异步跑，避免阻塞 API 超时）
             if lead.get("_score_penalty"):
                 score = lead.get("score", 5)
                 print(f"[search] 假线索/长标题跳过评分: {lead.get('company_name','')[:30]} → {score}分")
             else:
-                score = await call_coze_scoring_workflow(lead)
+                score = _rule_fallback_score({
+                    "company_name": lead.get("company_name", ""),
+                    "country": lead.get("country", ""),
+                    "product": lead.get("product_demand", ""),
+                    "industry": "",
+                    "website": "",
+                    "email_pattern": "",
+                    "confidence": lead.get("confidence", "C"),
+                    "decision_maker": "",
+                    "linkedin": "",
+                })
                 lead["score"] = score
             fields = {
                 "线索标题": f"{lead.get('company_name', '')}（{lead.get('country', '')}）",
@@ -3859,9 +3891,29 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
                 print(f"[search] 写入线索表失败: {we}")
         _invalidate_leads_cache()
 
-        # 4) 启动后台补搜线程（轻补搜→重评分→Top5深度补搜）
+        # 4) 后台异步 Coze 评分 + 补搜（不阻塞 API 返回）
         if leads_with_record_ids:
-            _start_enrichment_background(leads_with_record_ids)
+            def _background_score_and_enrich():
+                try:
+                    # 先跑 Coze 评分，更新飞书表
+                    for lead in leads_with_record_ids:
+                        if lead.get("_score_penalty"):
+                            continue
+                        try:
+                            new_score = asyncio.run(call_coze_scoring_workflow(lead))
+                            lead["score"] = new_score
+                            if lead.get("_record_id"):
+                                _feishu_api(
+                                    "PUT",
+                                    f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records/{lead['_record_id']}",
+                                    {"fields": {"综合评分": new_score}})
+                        except Exception as se:
+                            print(f"[search-bg] Coze评分失败: {lead.get('company_name','')}: {se}")
+                    # 再跑补搜
+                    _start_enrichment_background(leads_with_record_ids)
+                except Exception as e:
+                    print(f"[search-bg] 后台评分+补搜异常: {e}")
+            threading.Thread(target=_background_score_and_enrich, daemon=True).start()
 
         # 5) 为每条新线索自动创建消息通知（后台线程，不阻塞返回）
         if new_leads:
