@@ -5104,7 +5104,7 @@ async def api_cleanup_all_leads(request: Request):
         with open(backup_file, "w", encoding="utf-8") as f:
             json.dump({"timestamp": timestamp, "total": len(all_records), "records": all_records}, f, ensure_ascii=False, indent=2)
         
-        # 批量删除
+        # 批量删除线索
         record_ids = [r["record_id"] for r in all_records if "record_id" in r]
         deleted = 0
         for i in range(0, len(record_ids), 500):
@@ -5113,12 +5113,38 @@ async def api_cleanup_all_leads(request: Request):
                 _feishu_api("POST", f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records/batch_delete", {"records": batch})
                 deleted += len(batch)
             except Exception as e:
-                return JSONResponse({"ok": False, "message": f"删除失败：{e}", "deleted": deleted}, status_code=500)
+                return JSONResponse({"ok": False, "message": f"删除线索失败：{e}", "deleted": deleted}, status_code=500)
         
-        # 清除缓存
+        # 清除线索缓存
         _invalidate_leads_cache()
         
-        return {"ok": True, "action": "delete", "deleted": deleted, "backup": backup_file}
+        # 同时清理消息通知表
+        msg_deleted = 0
+        try:
+            msg_tid = _ensure_messages_table()
+            msg_records = []
+            page_token = ""
+            while True:
+                path = f"/bitable/v1/apps/{FEISHU_ATK}/tables/{msg_tid}/records?page_size=100"
+                if page_token:
+                    path += f"&page_token={page_token}"
+                resp = _feishu_api("GET", path)
+                items = resp.get("data", {}).get("items", [])
+                msg_records.extend(items)
+                if not resp.get("data", {}).get("has_more"):
+                    break
+                page_token = resp.get("data", {}).get("page_token", "")
+            
+            msg_ids = [r["record_id"] for r in msg_records if "record_id" in r]
+            for i in range(0, len(msg_ids), 500):
+                batch = msg_ids[i:i+500]
+                _feishu_api("POST", f"/bitable/v1/apps/{FEISHU_ATK}/tables/{msg_tid}/records/batch_delete", {"records": batch})
+                msg_deleted += len(batch)
+        except Exception as e:
+            # 消息清理失败不影响线索删除结果
+            pass
+        
+        return {"ok": True, "action": "delete", "deleted": deleted, "messages_deleted": msg_deleted, "backup": backup_file}
     
     return JSONResponse({"ok": False, "message": "未知 action"}, status_code=400)
 
