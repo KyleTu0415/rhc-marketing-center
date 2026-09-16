@@ -5072,6 +5072,76 @@ app.mount("/uploads", StaticFiles(directory=_uploads_dir), name="uploads")
 if static_dir:
     app.mount("/", StaticFiles(directory=static_dir, html=True), name="frontend")
 
+# ============================================================
+# 临时清理接口（用完即删）：备份全量线索 → 删除所有线索
+# 密钥：rhc-clean-2026-0916
+# ============================================================
+_CLEANUP_KEY = "rhc-clean-2026-0916"
+
+@app.post("/api/admin/cleanup-all-leads")
+async def api_cleanup_all_leads(request: Request):
+    """临时清理：备份全量线索 → 删除所有线索。需密钥。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    key = (body or {}).get("key", "")
+    if key != _CLEANUP_KEY:
+        return JSONResponse({"ok": False, "message": "密钥错误"}, status_code=403)
+    
+    action = (body or {}).get("action", "scan")  # scan=预览, delete=删除
+    
+    tid = _ensure_leads_table()
+    
+    # 拉取全量线索
+    all_records = []
+    page_token = ""
+    while True:
+        params = {"page_size": 100}
+        if page_token:
+            params["page_token"] = page_token
+        try:
+            resp = _feishu_api("GET", f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records", params=params)
+            items = resp.get("data", {}).get("items", [])
+            all_records.extend(items)
+            has_more = resp.get("data", {}).get("has_more", False)
+            page_token = resp.get("data", {}).get("page_token", "")
+            if not has_more:
+                break
+        except Exception as e:
+            return JSONResponse({"ok": False, "message": f"拉取失败：{e}"}, status_code=500)
+    
+    if action == "scan":
+        return {"ok": True, "action": "scan", "total": len(all_records), "preview": all_records[:5]}
+    
+    if action == "delete":
+        # 备份到本地
+        from datetime import datetime, timezone, timedelta
+        timestamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d_%H%M%S")
+        backup_file = f"RHC 运维备份/线索全量备份_{timestamp}.json"
+        os.makedirs("RHC 运维备份", exist_ok=True)
+        with open(backup_file, "w", encoding="utf-8") as f:
+            json.dump({"timestamp": timestamp, "total": len(all_records), "records": all_records}, f, ensure_ascii=False, indent=2)
+        
+        # 批量删除
+        record_ids = [r["record_id"] for r in all_records if "record_id" in r]
+        deleted = 0
+        for i in range(0, len(record_ids), 500):
+            batch = record_ids[i:i+500]
+            try:
+                _feishu_api("POST", f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records/batch_delete", {"records": batch})
+                deleted += len(batch)
+            except Exception as e:
+                return JSONResponse({"ok": False, "message": f"删除失败：{e}", "deleted": deleted}, status_code=500)
+        
+        # 清除缓存
+        _invalidate_leads_cache()
+        
+        return {"ok": True, "action": "delete", "deleted": deleted, "backup": backup_file}
+    
+    return JSONResponse({"ok": False, "message": "未知 action"}, status_code=400)
+
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
