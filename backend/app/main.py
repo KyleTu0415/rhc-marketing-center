@@ -3988,7 +3988,7 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
                 "决策人": "",
                 "LinkedIn": "",
                 "进口记录": "",
-                "入池时间": "",
+                "入池时间": now_iso,
             }
             try:
                 resp = _feishu_api(

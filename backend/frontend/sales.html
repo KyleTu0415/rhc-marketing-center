@@ -3326,6 +3326,11 @@ function updateMcBadge(){
 
 /* ===== Search New Leads ===== */
 function searchNewLeads() {
+  // 防止重复点击：搜索进行中时直接返回
+  if(window._searchRunning){
+    alert('上一轮搜索仍在进行中（含后台评分+补搜），请稍后再试');
+    return;
+  }
   var token = localStorage.getItem('rhc_auth_token');
   var card = document.getElementById('search-results-card');
   var list = document.getElementById('search-results-list');
@@ -3334,6 +3339,7 @@ function searchNewLeads() {
   card.style.display = '';
   list.innerHTML = '<div class="loading-state"><div class="spin"></div><div>正在搜索全网商机线索…</div></div>';
   countEl.textContent = '';
+  window._searchRunning = true;
 
   fetch('/api/leads/search', {
     method: 'POST',
@@ -3349,8 +3355,15 @@ function searchNewLeads() {
   })
   .then(function(r) { return r.json(); })
   .then(function(data) {
+    window._searchRunning = false;
     if(!data||data.ok===false){
-      list.innerHTML='<div class="empty-state" style="padding:40px 24px"><div class="es-icon">⚠️</div><div class="es-title">搜索失败</div><div class="es-desc">'+escHtml((data&&(data.message||data.error))||'请稍后重试')+'</div></div>';
+      // 区分"搜索进行中"和真正的失败
+      var msg = (data&&(data.message||data.error))||'请稍后重试';
+      if(msg.indexOf('仍在进行')>=0 || msg.indexOf('进行中')>=0){
+        list.innerHTML='<div class="empty-state" style="padding:40px 24px"><div class="es-icon">⏳</div><div class="es-title">搜索进行中</div><div class="es-desc">上一轮搜索的后台评分/补搜尚未完成，约需1-2分钟，请稍后再试。</div></div>';
+      } else {
+        list.innerHTML='<div class="empty-state" style="padding:40px 24px"><div class="es-icon">⚠️</div><div class="es-title">搜索失败</div><div class="es-desc">'+escHtml(msg)+'</div></div>';
+      }
       return;
     }
     var leads=Array.isArray(data.items)?data.items:(Array.isArray(data.leads)?data.leads:[]);
@@ -3372,6 +3385,7 @@ function searchNewLeads() {
     loadPublicPool(true);
   })
   .catch(function() {
+    window._searchRunning = false;
     list.innerHTML = '<div class="empty-state" style="padding:40px 24px"><div class="es-icon">⚠️</div><div class="es-title">搜索失败</div><div class="es-desc">请检查网络连接后重试</div></div>';
   });
 }
