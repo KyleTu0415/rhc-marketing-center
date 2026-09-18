@@ -2849,6 +2849,13 @@ _COMPETITOR_HOST_MARKS = (
     "vetlandmedical.com", "vetland.com", "lifesupport.in", "eickemeyer.com",
     "kruuse.com", "dispomed.com", "vetamac.com", "infiniumvet.com",
     "gradymedical.com", "rwdstco.com", "rwdlife.com", "midmark.com",
+    # 全球动物保健/兽医设备制造商（主体身份即厂家，非采购方；host-only 匹配，
+    # 经销商页面"提到"这些品牌不受影响）。与 Coze 分类 prompt 的 competitor 名单保持一致
+    "zoetis.com", "zoetis.", "msd-animal-health.com", "msd-animal-health.",
+    "merck-animal-health.com", "merck-animal-health.", "elanco.com", "elanco.",
+    "ceva.com", "ceva.", "virbac.com", "virbac.", "boehringer-ingelheim.com",
+    "boehringer-ingelheim.", "dechra.com", "dechra.", "vetoquinol.com",
+    "vetoquinol.", "hipra.com", "hipra.",
 )
 
 # 搜索 query 只挂头部竞品的 -site: 排除（Brave 对 query 长度有限制），
@@ -2993,21 +3000,58 @@ _PRODUCT_GENERIC_WORDS = {
 }
 
 
+# 多级公共后缀（国家二级域 + 通用后缀），整体从域名尾部剥掉，避免 .co.za 残个 "za"
+_MULTI_PUBLIC_SUFFIXES = {
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "edu.au",
+    "co.nz", "co.za", "org.za", "co.ke", "or.ke", "ac.ke", "go.ke",
+    "com.br", "com.mx", "com.ar", "co.in", "co.id", "co.th", "co.kr", "co.jp",
+    "com.cn", "com.tr", "com.eg", "com.ng", "com.sg", "com.my", "com.ph",
+    "com.vn", "com.co", "com.pe", "com.cl", "com.py", "com.uy", "com.ve",
+    "co.ve", "com.ec", "com.gt", "com.cr", "com.pa", "com.do", "co.tz",
+    "or.tz", "ac.tz", "go.tz", "co.ug", "ac.ug", "co.gh", "com.gh",
+    "co.cm", "co.ao", "co.mz", "co.zm", "co.zw", "co.bw", "co.na",
+}
+# 单标签后缀：通用 gTLD + 国家/地区 ccTLD（两字母一律视为后缀，品牌名里基本不会只有国家码）
+_SINGLE_PUBLIC_SUFFIXES = {
+    "com", "org", "net", "io", "co", "info", "biz", "gmbh", "ltd", "inc", "llc",
+    "shop", "store", "online", "site", "health", "vet", "care", "group", "za",
+    "uk", "au", "nz", "ke", "tz", "ug", "gh", "ng", "eg", "cm", "ao", "mz",
+    "zm", "zw", "bw", "na", "br", "mx", "ar", "cl", "co", "pe", "py", "uy",
+    "ve", "ec", "gt", "cr", "pa", "do", "in", "id", "th", "kr", "jp", "cn",
+    "tr", "sg", "my", "ph", "vn", "de", "fr", "es", "it", "pt", "nl", "pl",
+    "us", "ca", "eu", "me",
+}
+# 通用主机/二级标签（非品牌）
+_GENERIC_HOST_LABELS = {
+    "www", "shop", "store", "online", "get", "buy", "us", "uk", "eu",
+    "en", "www2", "m", "mail", "info", "contact", "order", "orders",
+}
+
+
 def _brand_from_domain(url: str) -> str:
     """从企业域名推断品牌名：apexx-equipment.com -> Apexx Equipment。
-    去掉 www、地区/通用二级域和公共后缀，连字符/点拆词后首字母大写。无法判断返回空串。"""
+    先剥多级公共后缀(.co.za/.com.au)，再剥单标签 gTLD/ccTLD 和通用主机标签，
+    连字符/点拆词后首字母大写。无法判断返回空串。"""
     try:
         from urllib.parse import urlparse
         host = urlparse(url).netloc.lower().split(":")[0]
-        parts = [p for p in re.split(r"[.\-]", host) if p]
-        drop = {"www", "shop", "store", "online", "get", "buy", "us", "uk", "eu",
-                "co", "com", "org", "net", "io", "de", "fr", "br", "com.br",
-                "co.uk", "info", "biz", "gmbh", "ltd"}
-        words = [p for p in parts if p not in drop and not p.isdigit() and len(p) > 1]
+        labels = [p for p in host.split(".") if p]
+        if len(labels) >= 2:
+            tail2 = ".".join(labels[-2:])
+            if tail2 in _MULTI_PUBLIC_SUFFIXES:
+                labels = labels[:-2]
+        if labels and labels[-1] in _SINGLE_PUBLIC_SUFFIXES:
+            labels = labels[:-1]
+        words = []
+        for lab in labels:
+            if lab in _GENERIC_HOST_LABELS or lab.isdigit() or len(lab) <= 1:
+                continue
+            words.extend(w for w in lab.split("-") if w)
+        words = [w for w in words if w not in _GENERIC_HOST_LABELS and not w.isdigit() and len(w) > 1]
         if not words:
             return ""
         brand = " ".join(words).replace("_", " ")
-        # 全是产品通名词则不算品牌
+        # 全是产品/类目通名词则不算品牌
         toks = re.findall(r"[a-z]+", brand.lower())
         if toks and all(t in _PRODUCT_GENERIC_WORDS for t in toks):
             return ""
@@ -3025,6 +3069,63 @@ def _is_product_phrase(name: str) -> bool:
         return True
     brand_words = [t for t in toks if t not in _PRODUCT_GENERIC_WORDS]
     return len(brand_words) == 0
+
+
+# 搜索结果标题里常见的"页面样板"噪音前缀（导航/电商/门户口吻），不是公司名的一部分
+_COMPANY_NOISE_PREFIX_RE = re.compile(
+    r"^\s*(?:welcome\s+to(?:\s+the)?|the\s+official\s+(?:site|website|homepage)\s+of|"
+    r"official\s+(?:site|website|homepage)\s+of|home\s*page|homepage|"
+    r"company\s+home(?:\s*page)?|about(?:\s+us)?|shop\s+for|shop\s+online(?:\s+for)?|"
+    r"sa(?:'s|’s)?\s+number\s+one|"
+    r"africa(?:'s|’s)?\s+number\s+one|number\s+one|"
+    r"leading|premier|top\s*rated|best)\s+",
+    re.I,
+)
+# 仅当整串就是单个通用导航/电商词时才剥离（避免第二轮把品牌里的 animal/home 误吃）
+_COMPANY_NOISE_BARE_RE = re.compile(
+    r"^\s*(?:home|shop|store|buy|order|get|find|visit|find\s+your|visit\s+our)\s+",
+    re.I,
+)
+# 尾部样板噪音（分页/站点口吻），剥离后仍是公司名主体
+_COMPANY_NOISE_SUFFIX_RE = re.compile(
+    r"\s*(?:[-–|,·•]\s*)?(?:home\s*page|homepage|official\s+website|official\s+site|"
+    r"website|web\s*site|home|welcome|about\s+us|contact\s+us)\s*$",
+    re.I,
+)
+# 剥离后若剩下的全是这些"非品牌"词，说明标题没有公司主体 → 回退用域名品牌
+_COMPANY_NONBRAND_WORDS = _PRODUCT_GENERIC_WORDS | {
+    "home", "page", "homepage", "website", "site", "official", "welcome",
+    "about", "us", "contact", "portal", "company", "number", "one", "south",
+    "africa", "africas", "agriculture", "agricultural", "agricultureand",
+    "livestock", "farming", "farm", "farms", "poultry", "agrovet", "agro",
+    "marketplace",
+}
+
+
+def _strip_company_name_noise(name: str, url: str) -> str:
+    """剥掉搜索标题里的页面样板噪音（Company home page / Shop for … / SA's number one …），
+    还原公司名；只对最终保留的公司型线索使用。剥完若已无品牌主体，则用域名品牌兜底。"""
+    c = (name or "").strip()
+    if not c:
+        return _brand_from_domain(url)
+    # 第一轮：多词样板前缀；仅当整串是单个导航词时才剥裸词；最多两轮防止叠加前缀
+    for i in range(2):
+        new = _COMPANY_NOISE_PREFIX_RE.sub("", c, count=1).strip(" -–|,·•")
+        if new == c:
+            new = _COMPANY_NOISE_BARE_RE.sub("", c, count=1).strip(" -–|,·•")
+        if new == c:
+            break
+        c = new
+    c = _COMPANY_NOISE_SUFFIX_RE.sub("", c).strip(" -–|,·•")
+    if not c:
+        return _brand_from_domain(url)
+    toks = re.findall(r"[a-z0-9]+", c.lower())
+    if not toks or all(t in _COMPANY_NONBRAND_WORDS for t in toks):
+        return _brand_from_domain(url)
+    # 剥离后若整体仍是全小写（品牌大写信息在原标题里已丢失），做首字母规范化
+    if c == c.lower():
+        c = " ".join(w.capitalize() for w in c.split())
+    return c[:80]
 
 
 # 电商货架/购物路径特征：在线商店的商品详情/分类/购物车页，是同行卖家货架而非买家主体
@@ -3225,6 +3326,13 @@ def _extract_company_info(title: str, snippet: str, url: str) -> dict:
             company = domain_brand
         else:
             company = ""
+
+    # 剥离标题里的页面样板噪音（Company home page / Shop for … / SA's number one …），
+    # 剥完无品牌主体则用域名品牌兜底；只影响最终保留的公司名
+    if company:
+        _stripped = _strip_company_name_noise(company, url)
+        if _stripped:
+            company = _stripped
 
     # 识别国家
     country = ""

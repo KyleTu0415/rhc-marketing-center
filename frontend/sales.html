@@ -2790,6 +2790,17 @@ function scoreBadgeHtml(score){
   return '<span class="score-badge '+cls+'">'+prefix+s+'分</span>';
 }
 
+/* 初始分提示：线索尚未补全官网/邮箱等任何联系方式、且分数被可达性闸门压到<=45 时，
+   在分数旁标注"初始分"，提醒销售补全后会自动重评上浮。纯展示，不改变评分。 */
+function initialScoreHintHtml(n){
+  var reachable=!!(n.website||n.email||n.emailPattern||n.decisionMaker||n.linkedin);
+  var enriched=/已补全|补全完成/.test(n.enrichStatus||'');
+  if(reachable||enriched||n.score>45)return '';
+  return '<span title="初始分：该线索尚未补全官网/邮箱等联系方式，按规则暂封顶45分；点「补全信息」补到官网或邮箱后会自动重新评分上浮。" '
+    +'style="display:inline-flex;align-items:center;height:20px;padding:0 7px;margin-left:6px;font-size:11px;'
+    +'color:#9a6a00;background:#fdf3e0;border:1px solid #f0d9a8;border-radius:10px;cursor:help;">初始分</span>';
+}
+
 function mcStatusTag(status){
   var map={
     '待开发':'mc-status-pending',
@@ -2954,6 +2965,7 @@ function renderLeadCard(ld,scope){
   /* 顶行：评分 + 评级 + 补搜状态 + 认领/跟进状态 */
   h+='<div class="lpc-top-row">';
   h+=scoreBadgeHtml(n.score);
+  h+=initialScoreHintHtml(n);
   if(n.grade)h+=gradeChipHtml(n.grade);
   h+=buildEnrichStatusHtml(n.enrichStatus);
   h+='<span class="lpc-spacer"></span>';
