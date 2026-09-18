@@ -2739,10 +2739,16 @@ def _brave_api_search(query: str, timeout: int = 8) -> list:
     if code != 200 or not body:
         raise RuntimeError(f"Brave http{code}")
     data = json.loads(body)
-    # 诊断：Brave 返回 0 结果时打印完整响应，排查 API 问题
+    # Brave API 新版返回 mixed 字段而非 web 字段
     web_results = (data.get("web") or {}).get("results") or []
     if not web_results:
-        print(f"[brave-diag] query={query[:80]} code={code} response_keys={list(data.keys())} web={data.get('web')}")
+        mixed = data.get("mixed") or {}
+        for item in (mixed.get("main") or []):
+            if item.get("type") == "web":
+                r = item.get("result") or {}
+                web_results.append(r)
+    if not web_results:
+        print(f"[brave-diag] query={query[:80]} code={code} response_keys={list(data.keys())} web={data.get('web')} mixed_keys={list((data.get('mixed') or {}).keys())}")
     out = []
     for it in web_results:
         u = (it.get("url") or "").strip()
