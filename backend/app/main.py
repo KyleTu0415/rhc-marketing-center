@@ -2672,6 +2672,20 @@ _lead_search_diag = {"engine_status": {}, "last_ok_engine": "", "ts": 0.0}
 _search_in_progress = False  # 搜索并发锁：防止两次搜索互相干扰
 _last_search_record_ids: list[str] = []  # 上一次搜索结果中的 record_id 列表，用于下次搜索时推入公海池
 
+# 异步搜索任务状态：POST 立即启动后台线程并返回，前端轮询 /status 直到 finished/error。
+# 这样全网搜索（Brave 1QPS，常 60s+）不会被平台网关按长请求掐断。
+_lead_search_job = {
+    "running": False,       # 后台线程是否仍在执行（含评分+补搜）
+    "searching": False,     # 是否仍在"全网搜索"阶段（评分/补搜阶段为 False）
+    "status": "idle",       # idle / running / finished / error
+    "phase": "",            # 人读进度文案
+    "done_queries": 0,
+    "total_queries": 0,
+    "result": None,         # 完成后的响应载荷（items/stats/empty_reason/diag）
+    "error": "",
+    "ts": 0.0,
+}
+
 
 def _http_fetch(url, headers, timeout=6, data=None):
     """统一HTTP抓取，返回 (http_code, body_text)；HTTPError也读body，其它异常上抛。"""
@@ -3908,7 +3922,16 @@ def _run_lead_search(max_results: int = 30) -> list:
     max_queries = min(len(queries), 25 if use_brave else 15)
     gap = 1.1 if use_brave else 0.5
     deep_search_triggered = False
+    try:
+        _lead_search_job["total_queries"] = max_queries
+        _lead_search_job["phase"] = "正在全网搜索买家线索…"
+    except Exception:
+        pass
     for i, query in enumerate(queries[:max_queries]):
+        try:
+            _lead_search_job["done_queries"] = i + 1
+        except Exception:
+            pass
         results = _search_ddg_leads(query, timeout=8 if use_brave else 6)
         if not results:
             empty_rounds += 1
@@ -4077,10 +4100,35 @@ class LeadSearchRequest(BaseModel):
     force_refresh: Optional[bool] = False
 
 
+@app.get("/api/leads/search/status")
+async def api_leads_search_status(request: Request):
+    """前端轮询：返回当前异步搜索任务的进度/结果。需登录。"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info:
+        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    st = _lead_search_job.get("status")
+    if st == "finished" and _lead_search_job.get("result") is not None:
+        payload = dict(_lead_search_job["result"])
+        payload["ok"] = True
+        payload["status"] = "finished"
+        return payload
+    if st == "error":
+        return {"ok": False, "status": "error",
+                "message": _lead_search_job.get("error") or "搜索失败，请稍后重试"}
+    return {
+        "ok": True, "status": "running",
+        "searching": _lead_search_job.get("searching", True),
+        "phase": _lead_search_job.get("phase", ""),
+        "done_queries": _lead_search_job.get("done_queries", 0),
+        "total_queries": _lead_search_job.get("total_queries", 0),
+    }
+
+
 @app.post("/api/leads/search")
 async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = None):
-    """AI主动搜索全网潜在客户，返回结构化线索列表。
-    自动去重已有线索、质量评级、生成跟进建议。需登录。"""
+    """AI主动搜索：立即在后台启动全网搜索任务并返回（不阻塞，避免长请求被网关掐断）。
+    前端随后轮询 GET /api/leads/search/status 获取进度与结果。需登录。"""
     token = _get_token_from_request(request)
     user_info = _verify_token(token) if token else None
     if not user_info:
@@ -4092,24 +4140,38 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
         max_results = min(req.max_results or 30, 50)
         force_refresh = req.force_refresh or False
 
-    # 缓存检查
+    # 30 秒内已有结果且未强制刷新：直接命中缓存，无需启动后台任务
     now = time.time()
     if not force_refresh and _search_results_cache["data"] is not None \
             and now - _search_results_cache["ts"] < _SEARCH_CACHE_TTL:
-        return {"ok": True, "items": _search_results_cache["data"],
-                "total": len(_search_results_cache["data"]),
-                "cached": True}
+        return {"ok": True, "status": "finished", "items": _search_results_cache["data"],
+                "total": len(_search_results_cache["data"]), "cached": True}
 
-    # 并发锁：防止两次搜索互相干扰（后台补搜写入的线索会被下次搜索去重掉）
-    global _search_in_progress
+    # 并发锁：上一轮（含评分+补搜）未结束则不允许重复启动
     if _search_in_progress:
-        return {"ok": False, "message": "上一轮搜索仍在进行中（含后台评分+补搜），请稍后再试",
-                "total": 0, "cached": False}
-    _search_in_progress = True
+        return {"ok": False, "status": "busy",
+                "message": "上一轮搜索仍在进行中（含后台评分+补搜），请稍候查看进度"}
 
+    # 初始化任务状态并启动后台线程
+    _lead_search_job.update({
+        "running": True, "searching": True, "status": "running",
+        "phase": "正在全网搜索买家线索…", "done_queries": 0, "total_queries": 0,
+        "result": None, "error": "", "ts": time.time(),
+    })
+    threading.Thread(target=_run_lead_search_job, args=(max_results,), daemon=True).start()
+    return {"ok": True, "status": "started",
+            "message": "搜索已开始，请稍候查看结果"}
+
+
+def _run_lead_search_job(max_results: int = 30):
+    """后台执行完整搜索管线（迁移公海→全网搜索→去重→写入飞书→启动评分/补搜）。
+    全程把进度/结果写入 _lead_search_job，供状态接口轮询；不向调用方抛异常。"""
+    global _search_in_progress, _last_search_record_ids
+    _search_in_progress = True
+    leads_with_record_ids = []
     try:
-        # 0) 迁移上一轮搜索结果到公海池（设置入池时间）
-        global _last_search_record_ids
+        _lead_search_job["searching"] = True
+        _lead_search_job["phase"] = "正在把上一轮线索整理进公海池…"
         if _last_search_record_ids:
             migrate_time = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
             tid = _ensure_leads_table()
@@ -4124,9 +4186,13 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
             _invalidate_leads_cache()
             print(f"[search] 已将 {len(_last_search_record_ids)} 条上轮线索推入公海池")
 
-        # 1) 执行基础搜索（同步抓取放到线程池，避免阻塞事件循环）
-        raw_leads = await asyncio.to_thread(_run_lead_search, max_results)
+        # 1) 执行基础搜索（本函数已在后台线程中，直接同步调用）
+        _lead_search_job["searching"] = True
+        _lead_search_job["phase"] = "正在全网搜索买家线索…"
+        raw_leads = _run_lead_search(max_results)
         search_diag = getattr(raw_leads, "_search_diag", None) or {}
+        _lead_search_job["searching"] = False
+        _lead_search_job["phase"] = "正在去重、评分并写入线索表…"
 
         # 2) 与已有线索去重
         try:
@@ -4247,6 +4313,9 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
                 finally:
                     global _search_in_progress
                     _search_in_progress = False
+                    _lead_search_job["running"] = False
+                    if _lead_search_job.get("status") == "finished":
+                        _lead_search_job["phase"] = "本轮 AI 评分与联系方式补全已完成"
                     print("[search-bg] 后台任务全部完成，搜索锁已释放")
             threading.Thread(target=_background_score_and_enrich, daemon=True).start()
 
@@ -4312,8 +4381,7 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
                 empty_reason = "搜索到的结果均为目录页/聚合页，未能识别出真实公司，已自动过滤。"
             else:
                 empty_reason = "本轮搜到的线索此前均已入库，暂无新增（已自动去重）。"
-        return {
-            "ok": True,
+        result_payload = {
             "items": new_leads,
             "total": len(new_leads),
             "cached": False,
@@ -4329,14 +4397,32 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
             },
             "search_time": datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S"),
         }
+        # 后台评分/补搜仍在跑时，先把搜索结果置为 finished 供前端展示；
+        # _search_in_progress 仍保持 True，由评分线程 finally 释放（防止下一轮与补搜互相去重）。
+        if leads_with_record_ids:
+            _lead_search_job["phase"] = "搜索完成，后台正在 AI 评分与补全联系方式…"
+        else:
+            _search_in_progress = False
+            _lead_search_job["running"] = False
+        _lead_search_job["status"] = "finished"
+        _lead_search_job["result"] = result_payload
+        return
     except Exception as e:
+        import traceback
         print(f"[search] 主动搜索失败: {e}")
+        traceback.print_exc()
         _search_in_progress = False
-        return JSONResponse({"ok": False, "message": f"搜索失败：{e}"}, status_code=502)
+        _lead_search_job.update({
+            "running": False, "searching": False,
+            "status": "error", "error": f"搜索失败：{e}"})
+        return
     finally:
-        # 无后台线程时立即释放锁；有后台线程时由后台线程的 finally 释放
+        # 无后台评分线程时（或搜索阶段就异常）立即释放锁；有评分线程时由其 finally 释放
         if not leads_with_record_ids:
             _search_in_progress = False
+            _lead_search_job["running"] = False
+            if _lead_search_job.get("status") == "running":
+                _lead_search_job["searching"] = False
 
 
 # ============================================================

@@ -3344,31 +3344,17 @@ function searchNewLeads() {
   // 禁用按钮，显示灰色"搜索中..."
   if(btn){ btn.disabled=true; btn.textContent=' 搜索中…'; btn.style.opacity='0.5'; btn.style.cursor='not-allowed'; }
 
-  fetch('/api/leads/search', {
-    method: 'POST',
-    headers: {
-      'Authorization': 'Bearer ' + token,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      target_markets: ['南美', '非洲', '欧洲', '东南亚'],
-      industry: 'veterinary',
-      limit: 10
-    })
-  })
-  .then(function(r) { return r.json(); })
-  .then(function(data) {
-    // 恢复按钮
-    if(btn){ btn.disabled=false; btn.textContent=' 搜索新线索'; btn.style.opacity=''; btn.style.cursor=''; }
-    if(!data||data.ok===false){
-      var msg = (data&&(data.message||data.error))||'请稍后重试';
-      if(msg.indexOf('仍在进行')>=0 || msg.indexOf('进行中')>=0){
-        list.innerHTML='<div class="empty-state" style="padding:40px 24px"><div class="es-icon">⏳</div><div class="es-title">搜索进行中</div><div class="es-desc">上一轮搜索的后台评分/补搜尚未完成，约需1-2分钟，请稍后再试。</div></div>';
-      } else {
-        list.innerHTML='<div class="empty-state" style="padding:40px 24px"><div class="es-icon">⚠️</div><div class="es-title">搜索失败</div><div class="es-desc">'+escHtml(msg)+'</div></div>';
-      }
-      return;
-    }
+  function resetBtn(){ if(btn){ btn.disabled=false; btn.textContent=' 搜索新线索'; btn.style.opacity=''; btn.style.cursor=''; } }
+  function showFail(title, desc){
+    list.innerHTML='<div class="empty-state" style="padding:40px 24px"><div class="es-icon">⚠️</div><div class="es-title">'+escHtml(title)+'</div><div class="es-desc">'+escHtml(desc)+'</div></div>';
+    countEl.textContent='';
+  }
+  function renderProgress(phase, done, total){
+    var p = phase || '正在全网搜索买家线索…';
+    var sub = (total>0) ? ('已搜索 '+done+'/'+total+' 个关键词') : '搜索在后台进行，多花点时间也不会中断，请耐心等待';
+    list.innerHTML='<div class="loading-state"><div class="spin"></div><div>'+escHtml(p)+'</div><div style="opacity:.65;font-size:12px;margin-top:6px">'+escHtml(sub)+'</div></div>';
+  }
+  function finishSearch(data){
     var leads=Array.isArray(data.items)?data.items:(Array.isArray(data.leads)?data.leads:[]);
     if(!leads.length){
       var reason=escHtml(data.empty_reason||'请调整搜索条件或稍后再试');
@@ -3378,19 +3364,61 @@ function searchNewLeads() {
     }
     countEl.textContent='本轮新增 '+leads.length+' 条线索 · 下次搜索时将自动进入公海池';
     var html='';
-    for(var i=0;i<leads.length;i++){
-      html+=renderLeadCard(leads[i],'public');
-    }
+    for(var i=0;i<leads.length;i++){ html+=renderLeadCard(leads[i],'public'); }
     list.innerHTML=html;
-    // 搜索完成后刷新公海池（上一轮线索可能已入池）
     publicPoolCache=null;
     enrichmentPollGraceUntil=Date.now()+20000;
     loadPublicPool(true);
+  }
+
+  // 1) 启动后台搜索任务（立即返回，不再长时间占用连接）
+  fetch('/api/leads/search', {
+    method:'POST',
+    headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
+    body:JSON.stringify({target_markets:['南美','非洲','欧洲','东南亚'], industry:'veterinary', limit:10})
   })
-  .catch(function() {
-    // 恢复按钮
-    if(btn){ btn.disabled=false; btn.textContent=' 搜索新线索'; btn.style.opacity=''; btn.style.cursor=''; }
-    list.innerHTML = '<div class="empty-state" style="padding:40px 24px"><div class="es-icon">⚠️</div><div class="es-title">搜索失败</div><div class="es-desc">请检查网络连接后重试</div></div>';
+  .then(function(r){return r.json();})
+  .then(function(data){
+    if(!data || data.ok===false){
+      var msg=(data&&(data.message||data.error))||'请稍后重试';
+      resetBtn();
+      if((data&&data.status)==='busy' || msg.indexOf('进行中')>=0 || msg.indexOf('进行')>=0){
+        showFail('搜索进行中','上一轮搜索的后台评分/补搜尚未完成，请稍候再点一次查看结果。');
+      }else{
+        showFail('搜索失败', msg);
+      }
+      return;
+    }
+    // 命中缓存：直接返回结果
+    if(data.status==='finished'){ resetBtn(); finishSearch(data); return; }
+    // 已启动后台任务：进入轮询
+    renderProgress('已开始搜索…', 0, 0);
+    var elapsed=0, interval=2500, maxWait=300000;  // 最多等 5 分钟
+    var timer=setInterval(function(){
+      elapsed+=interval;
+      fetch('/api/leads/search/status', {headers:{'Authorization':'Bearer '+token}, cache:'no-store'})
+      .then(function(r){return r.json();})
+      .then(function(st){
+        if(!st){return;}
+        if(st.status==='finished'){
+          clearInterval(timer); resetBtn(); finishSearch(st);
+        }else if(st.status==='error'){
+          clearInterval(timer); resetBtn();
+          showFail('搜索失败', st.message||'后台搜索出错，请稍后重试');
+        }else if(st.status==='running'){
+          renderProgress(st.phase, st.done_queries||0, st.total_queries||0);
+          if(elapsed>=maxWait){
+            clearInterval(timer); resetBtn();
+            showFail('搜索仍在进行','本轮搜索耗时较长，仍在后台继续；请稍等 1 分钟后再点「搜索新线索」查看结果。');
+          }
+        }
+      })
+      .catch(function(){ /* 单次轮询失败不致命，下一轮继续 */ });
+    }, interval);
+  })
+  .catch(function(){
+    resetBtn();
+    showFail('搜索失败','与服务器连接中断，请检查网络后重试（搜索结果不受影响，可稍后再点一次查看）');
   });
 }
 
