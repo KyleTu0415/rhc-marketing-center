@@ -414,6 +414,8 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
 
 /* ===== Search Lead Cards ===== */
 #search-results-list{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+#search-results-list:has(.empty-state){grid-template-columns:1fr}
+#search-results-list .empty-state{grid-column:1/-1}
 @media(max-width:900px){#search-results-list{grid-template-columns:1fr}}
 .search-lead-card{
   background:var(--color-surface);
