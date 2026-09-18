@@ -2743,7 +2743,11 @@ def _brave_api_search(query: str, timeout: int = 8) -> list:
     web_results = (data.get("web") or {}).get("results") or []
     if not web_results:
         mixed = data.get("mixed") or {}
-        for item in (mixed.get("main") or []):
+        main_items = mixed.get("main") or []
+        if main_items:
+            # 诊断：打印 mixed.main 前2项结构
+            print(f"[brave-mixed] query={query[:60]} main_len={len(main_items)} sample={json.dumps(main_items[0], ensure_ascii=False)[:300]}")
+        for item in main_items:
             if item.get("type") == "web":
                 r = item.get("result") or {}
                 web_results.append(r)
