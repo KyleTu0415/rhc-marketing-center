@@ -826,6 +826,8 @@ LEADS_FIELDS_SCHEMA = [
     {"field_name": "最近发信时间", "type": 1},
     {"field_name": "发信次数", "type": 2},
     {"field_name": "入池时间", "type": 1},
+    {"field_name": "页面类型", "type": 1},   # 文本：company/directory/b2b_platform/news_report/navigation/competitor/unknown
+    {"field_name": "买家类型", "type": 1},   # 文本：importer/distributor/wholesaler/dealer/hospital/clinic/manufacturer/unknown（用文本避免单选枚举置空）
 ]
 
 
@@ -905,11 +907,17 @@ async def _migrate_legacy_scores():
         if old < 50:
             continue  # 已是低分，无需修正
         try:
-            new_score = await call_coze_scoring_workflow(ld)
-            if new_score != old:
-                _update_leads_record(rid, {"综合评分": new_score})
-                fixed += 1
-                print(f"[score-migrate] 校正虚高分：{ld.get('公司/机构','')} {old} -> {new_score}")
+            new_score, page_type, buyer_type = await call_coze_scoring_workflow(ld)
+            upd = {"综合评分": new_score}
+            if page_type:
+                upd["页面类型"] = page_type
+            if buyer_type:
+                upd["买家类型"] = buyer_type
+            if new_score != old or page_type or buyer_type:
+                _update_leads_record(rid, upd)
+                if new_score != old:
+                    fixed += 1
+                print(f"[score-migrate] 校正虚高分：{ld.get('公司/机构','')} {old} -> {new_score}（{page_type}/{buyer_type}）")
             await asyncio.sleep(0.3)
         except Exception as e:
             print(f"[score-migrate] 单条校正失败（{rid}）: {e}")
@@ -2650,6 +2658,10 @@ def _build_search_queries():
         queries.append(f'veterinary medical equipment dealer {country}')
         queries.append(f'animal health products distributor {country}')
 
+    # 统一追加：头部竞品 -site: 排除 + 二手/翻新精确短语排除
+    _neg_suffix = f"{_COMPETITOR_SITE_SUFFIX} {_SECONDHAND_SUFFIX}"
+    queries = [f"{q} {_neg_suffix}" for q in queries]
+
     # 随机打乱顺序，每次搜索覆盖不同组合
     random.shuffle(queries)
     return queries
@@ -2797,6 +2809,26 @@ def _brave_api_search(query: str, timeout: int = 8) -> list:
 
 # 主动获客结果域名黑名单：B2B贸易目录/聚合站、社媒、电商、新闻、招聘等非企业官网。
 # 这些站点既不是可开发的买家，也产生 "Global ... trade data" 这类脏公司名。
+# 竞品/同行域名：命中即视为同行而非潜在买家，直接从线索中排除（可审计，见丢弃日志）。
+_COMPETITOR_HOST_MARKS = (
+    "mindrayanimal.com", "mindray.com", "dremed.com", "dreveterinary.com",
+    "vetlandmedical.com", "vetland.com", "lifesupport.in", "eickemeyer.com",
+    "kruuse.com", "dispomed.com", "vetamac.com", "infiniumvet.com",
+    "gradymedical.com", "rwdstco.com", "rwdlife.com", "midmark.com",
+)
+
+# 搜索 query 只挂头部竞品的 -site: 排除（Brave 对 query 长度有限制），
+# 其余竞品统一交给上面的后置域名过滤兜底。
+_COMPETITOR_SITE_EXCLUDE = (
+    "mindrayanimal.com", "kruuse.com", "dremed.com",
+    "vetlandmedical.com", "eickemeyer.com",
+)
+# 拼装一次复用：-site:mindrayanimal.com -site:kruuse.com ...
+_COMPETITOR_SITE_SUFFIX = " ".join(f"-site:{d}" for d in _COMPETITOR_SITE_EXCLUDE)
+
+# 二手/翻新精确短语排除（不用裸 -used，避免误伤 "used by veterinarians" 等正常公司页）
+_SECONDHAND_SUFFIX = '-"used equipment" -"second hand" -"second-hand" -"pre-owned" -refurbished'
+
 _JUNK_HOST_MARKS = (
     # B2B / 贸易数据 / 黄页目录
     "volza.com", "turkishexporter.net", "exportersindia.com", "tradeindia.com",
@@ -2829,7 +2861,7 @@ def _is_junk_result_url(url: str) -> bool:
         return True
     if not host:
         return True
-    return any(mark in host for mark in _JUNK_HOST_MARKS)
+    return any(mark in host for mark in (_JUNK_HOST_MARKS + _COMPETITOR_HOST_MARKS))
 
 
 def _filter_junk_results(results: list):
@@ -3328,21 +3360,90 @@ def _extract_scoring_payload(data: dict) -> dict:
             "total_score": embedded.get("total_score"),
             "breakdown": embedded.get("breakdown", ""),
             "recommendation": embedded.get("recommendation", ""),
+            "page_type": embedded.get("page_type", ""),
+            "buyer_type": embedded.get("buyer_type", ""),
         }
     # 情况a：字段已各归各位
     return {
         "total_score": total,
         "breakdown": data.get("breakdown", ""),
         "recommendation": data.get("recommendation", ""),
+        "page_type": data.get("page_type", ""),
+        "buyer_type": data.get("buyer_type", ""),
     }
 
 
-async def call_coze_scoring_workflow(lead_info: dict) -> int:
-    """调用Coze Lead_Score工作流AI打分，返回0-100整数。
+# 页面类型 / 买家类型枚举（与 Coze Lead_Score 提示词保持一致）
+_PAGE_TYPES = ("company", "directory", "b2b_platform", "news_report", "navigation", "competitor")
+_BUYER_TYPES = ("importer", "distributor", "wholesaler", "dealer",
+                "hospital", "clinic", "manufacturer")
+
+# 页面类型规则粗判：URL 路径 + 标题（Coze 返回前先写初值，返回后由 AI 覆盖）
+_RULE_PAGE_TYPE_HINTS = (
+    ("directory", ("/directory", "/directories", "/categories", "/category",
+                   "/list-of", "list-of-", "/sellers", "/companies")),
+    ("b2b_platform", ("alibaba.com", "made-in-china", "tradeindia", "indiamart",
+                      "globalsources", "europages", "kompass", "thomasnet")),
+    ("news_report", ("/news", "/press", "/article", "/blog", "prnewswire",
+                     "businesswire", "reuters", "/media")),
+    ("navigation", ("/sitemap", "/tag/", "/tags/", "/search?", "/index/")),
+)
+_RULE_PAGE_TITLE_HINTS = (
+    ("directory", ("list of", "top 10", "top 20", "best companies", "directory",
+                   "companies in", "suppliers in", "our distributors", "where to buy")),
+    ("news_report", ("news", "report", "press release", "announces", "market research")),
+)
+# 买家类型规则粗判（仅在判定为公司页时有意义）
+_RULE_BUYER_HINTS = (
+    ("importer", ("importer", "import", "importacion", "importadora")),
+    ("distributor", ("distributor", "distribuidor", "distribution", "distribute")),
+    ("wholesaler", ("wholesale", "wholesaler", "mayorista")),
+    ("dealer", ("dealer", "dealership", "reseller", "agent")),
+    ("hospital", ("animal hospital", "veterinary hospital", "pet hospital", "hospital veterin")),
+    ("clinic", ("clinic", "clinica", "veterinary center", "vet center")),
+    ("manufacturer", ("manufacturer", "manufacturing", "factory", "producer", "fabricante")),
+)
+
+
+def _rule_guess_page_type(url: str = "", title: str = "", snippet: str = "") -> str:
+    """规则法粗判页面类型，返回枚举值；无法判断时返回 unknown。Coze 结果返回后覆盖。"""
+    u = (url or "").lower()
+    t = f"{title or ''} {snippet or ''}".lower()
+    for ptype, marks in _RULE_PAGE_TYPE_HINTS:
+        if any(m in u for m in marks):
+            return ptype
+    for ptype, marks in _RULE_PAGE_TITLE_HINTS:
+        if any(m in t for m in marks):
+            return ptype
+    return "company" if (url or title) else "unknown"
+
+
+def _rule_guess_buyer_type(url: str = "", title: str = "", snippet: str = "") -> str:
+    """规则法粗判买家类型，返回枚举值；无法判断时返回 unknown。Coze 结果返回后覆盖。"""
+    blob = f"{title or ''} {snippet or ''} {url or ''}".lower()
+    for btype, marks in _RULE_BUYER_HINTS:
+        if any(m in blob for m in marks):
+            return btype
+    return "unknown"
+
+
+def _normalize_page_type(v: str) -> str:
+    v = (v or "").strip().lower()
+    return v if v in _PAGE_TYPES else ""
+
+
+def _normalize_buyer_type(v: str) -> str:
+    v = (v or "").strip().lower()
+    return v if v in _BUYER_TYPES or v == "unknown" else ""
+
+
+async def call_coze_scoring_workflow(lead_info: dict) -> tuple:
+    """调用Coze Lead_Score工作流AI打分，返回 (score:int, page_type:str, buyer_type:str)。
     - 入参兼容英文/中文字段名；
     - 打分前清洗脏公司名（搜索词短语），且脏名不向 product 白嫖关键词；
+    - 同时把 source_url/page_title/page_snippet 传给工作流做页面真实性闸门分类；
     - 出口经过可达性闸门：无邮箱/官网/决策人/LinkedIn 的线索封顶45；
-    工作流不可用/解析失败/超时 → 规则兜底，保证主流程不中断。"""
+    工作流不可用/解析失败/超时 → 分数规则兜底、分类规则粗判，保证主流程不中断。"""
     wf_id = (getattr(settings, "COZE_LEAD_SCORE_WORKFLOW_ID", None)
              or getattr(settings, "coze_lead_score_workflow_id", "") or "")
     pat = (_get_sales_coze_pat()
@@ -3358,6 +3459,12 @@ async def call_coze_scoring_workflow(lead_info: dict) -> int:
     email_pattern = _lead_val(lead_info, "email_pattern", "邮箱格式", "联系邮箱", "email")
     grade = _lead_val(lead_info, "confidence", "评级") or "C"
 
+    # 页面真实性闸门三要素：搜索命中的原始 URL / 标题 / 摘要
+    source_url = (_lead_val(lead_info, "source_url", "原文链接", "url")
+                  or lead_info.get("website", "") or "")
+    page_title = _lead_val(lead_info, "page_title", "线索标题", "title")
+    page_snippet = _lead_val(lead_info, "page_snippet", "摘要", "snippet")
+
     # 脏公司名：若产品词直接来自该垃圾短语，不可让它白嫖"产品契合度"
     product = raw_product
     if not clean_company and raw_company:
@@ -3372,8 +3479,14 @@ async def call_coze_scoring_workflow(lead_info: dict) -> int:
         "linkedin": _lead_val(lead_info, "linkedin", "LinkedIn"),
     }
 
+    # 任意兜底路径：分数用规则，分类用 URL+标题+摘要规则粗判（AI 不可用时仍有初值）
+    def _fallback():
+        pt = _rule_guess_page_type(source_url, page_title, page_snippet)
+        bt = _rule_guess_buyer_type(source_url, page_title, page_snippet)
+        return _rule_fallback_score(norm), pt, bt
+
     if not pat or not wf_id:
-        return _rule_fallback_score(norm)
+        return _fallback()
     parameters = {
         "company_name": clean_company,
         "country": country,
@@ -3382,6 +3495,9 @@ async def call_coze_scoring_workflow(lead_info: dict) -> int:
         "website": website,
         "email_pattern": email_pattern,
         "grade": grade,
+        "source_url": source_url,
+        "page_title": page_title,
+        "page_snippet": page_snippet,
     }
     try:
         data = await asyncio.wait_for(
@@ -3391,14 +3507,20 @@ async def call_coze_scoring_workflow(lead_info: dict) -> int:
         score = parsed.get("total_score")
         score = int(float(score))
         if 0 <= score <= 100:
-            return _apply_score_gate(score, norm)
-        return _rule_fallback_score(norm)
+            final_score = _apply_score_gate(score, norm)
+            # 分类以 AI 为准；AI 没给或给了非法值时回退规则粗判
+            page_type = (_normalize_page_type(parsed.get("page_type", ""))
+                         or _rule_guess_page_type(source_url, page_title, page_snippet))
+            buyer_type = (_normalize_buyer_type(parsed.get("buyer_type", ""))
+                          or _rule_guess_buyer_type(source_url, page_title, page_snippet))
+            return final_score, page_type, buyer_type
+        return _fallback()
     except asyncio.TimeoutError:
         print(f"[score] Coze打分超时，规则兜底: {clean_company or raw_company}")
-        return _rule_fallback_score(norm)
+        return _fallback()
     except Exception as e:
         print(f"[score] Coze打分失败({e})，规则兜底: {clean_company or raw_company}")
-        return _rule_fallback_score(norm)
+        return _fallback()
 
 
 # ============================================================
@@ -3632,9 +3754,16 @@ async def _enrich_all_leads_async(new_leads: list):
         if not record_id:
             continue
         try:
-            new_score = await call_coze_scoring_workflow(lead)
+            new_score, page_type, buyer_type = await call_coze_scoring_workflow(lead)
             lead["score"] = new_score
-            _update_leads_record(record_id, {"综合评分": new_score})
+            upd = {"综合评分": new_score}
+            if page_type:
+                upd["页面类型"] = page_type
+                lead["page_type"] = page_type
+            if buyer_type:
+                upd["买家类型"] = buyer_type
+                lead["buyer_type"] = buyer_type
+            _update_leads_record(record_id, upd)
         except Exception as e:
             print(f"[enrich] 重评分失败 ({lead.get('company_name')}): {e}")
     _invalidate_leads_cache()
@@ -3741,30 +3870,27 @@ def _dedup_with_existing_leads(new_leads: list, existing_leads: list) -> list:
 
 
 def _build_deep_search_queries():
-    """当常规搜索去重后无新线索时，用更广泛的关键词组合补充搜索。"""
+    """首轮结果不足时的兜底搜索：只保留真实买家身份/采购意图词，
+    不再用展会参展商、协会会员、行业目录、批发清单（这些多为聚合/目录页，非买家主体）。"""
     import random
     extra = []
-    # 更宽泛的行业搜索
-    broad_terms = [
+    # 买家身份 / 采购 / 招投标意图词（{country} 占位，按抽样国家展开）
+    buyer_terms = [
         "veterinary equipment importer",
-        "animal hospital supplier",
+        "animal hospital procurement",
         "veterinary distributor",
-        "livestock equipment importer",
-        "pet clinic supplier",
-        "veterinary anesthesia supplier",
-        "veterinary monitor importer",
+        "veterinary equipment tender",
         "animal health distributor",
+        "veterinary clinic equipment buyer",
     ]
-    for term in broad_terms:
-        for country in random.sample(list(_SEARCH_COUNTRIES.keys()), min(4, len(_SEARCH_COUNTRIES))):
-            extra.append(f'{term} {country}')
-    # 行业展会/协会相关
-    extra.extend([
-        "veterinary equipment exhibitor trade show",
-        "veterinary medical devices association member",
-        "animal health industry directory",
-        "veterinary supply wholesale list",
-    ])
+    countries = random.sample(
+        list(_SEARCH_COUNTRIES.keys()), min(4, len(_SEARCH_COUNTRIES)))
+    for term in buyer_terms:
+        for country in countries:
+            extra.append(f"{term} {country}")
+    # 统一追加：头部竞品 -site: 排除 + 二手/翻新精确短语排除
+    _neg_suffix = f"{_COMPETITOR_SITE_SUFFIX} {_SECONDHAND_SUFFIX}"
+    extra = [f"{q} {_neg_suffix}" for q in extra]
     random.shuffle(extra)
     return extra
 
@@ -3893,6 +4019,9 @@ def _run_lead_search(max_results: int = 30) -> list:
             "source": f"{engine_name}: {r.get('_query', '')[:60]}",
             "confidence": grade,
             "ai_suggestion": "",
+            # 保留搜索命中的原始页面信息，供 Coze 判页面类型/买家类型（与飞书 原文链接/线索标题/摘要 对应）
+            "page_title": (r.get("title", "") or "")[:500],
+            "page_snippet": (r.get("snippet", "") or "")[:1000],
         }
         lead["ai_suggestion"] = _generate_ai_suggestion(lead)
 
@@ -4053,6 +4182,15 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
                 "LinkedIn": "",
                 "进口记录": "",
                 "入池时间": now_iso,
+                # 页面/买家类型先用规则粗判写初值，Coze 返回后由 AI 覆盖
+                "页面类型": _rule_guess_page_type(
+                    lead.get("website", ""),
+                    lead.get("page_title", ""),
+                    lead.get("page_snippet", "")),
+                "买家类型": _rule_guess_buyer_type(
+                    lead.get("website", ""),
+                    lead.get("page_title", ""),
+                    lead.get("page_snippet", "")),
             }
             try:
                 resp = _feishu_api(
@@ -4074,16 +4212,32 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
                 try:
                     # 先跑 Coze 评分，更新飞书表
                     for lead in leads_with_record_ids:
-                        if lead.get("_score_penalty"):
-                            continue
                         try:
-                            new_score = asyncio.run(call_coze_scoring_workflow(lead))
-                            lead["score"] = new_score
+                            if lead.get("_score_penalty"):
+                                # 假线索不走 Coze：分类直接规则粗判（多为 directory/navigation）
+                                page_type = _rule_guess_page_type(
+                                    lead.get("website", ""),
+                                    lead.get("page_title", ""),
+                                    lead.get("page_snippet", ""))
+                                buyer_type = _rule_guess_buyer_type(
+                                    lead.get("website", ""),
+                                    lead.get("page_title", ""),
+                                    lead.get("page_snippet", ""))
+                            else:
+                                new_score, page_type, buyer_type = asyncio.run(
+                                    call_coze_scoring_workflow(lead))
+                                lead["score"] = new_score
+                            lead["page_type"] = page_type
+                            lead["buyer_type"] = buyer_type
                             if lead.get("_record_id"):
+                                upd_fields = {"页面类型": page_type or "unknown",
+                                              "买家类型": buyer_type or "unknown"}
+                                if not lead.get("_score_penalty"):
+                                    upd_fields["综合评分"] = lead.get("score", 0)
                                 _feishu_api(
                                     "PUT",
                                     f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records/{lead['_record_id']}",
-                                    {"fields": {"综合评分": new_score}})
+                                    {"fields": upd_fields})
                         except Exception as se:
                             print(f"[search-bg] Coze评分失败: {lead.get('company_name','')}: {se}")
                     # 再跑补搜
@@ -5283,8 +5437,12 @@ async def api_leads_enrich(record_id: str, req: Optional[EnrichLeadRequest] = No
                 update_fields["邮箱格式"] = enriched["email_pattern"]
             # 重评分
             lead_info = {**{k: _tv(v) for k, v in fields.items()}, **enriched}
-            new_score = await call_coze_scoring_workflow(lead_info)
+            new_score, page_type, buyer_type = await call_coze_scoring_workflow(lead_info)
             update_fields["综合评分"] = new_score
+            if page_type:
+                update_fields["页面类型"] = page_type
+            if buyer_type:
+                update_fields["买家类型"] = buyer_type
             _update_leads_record(record_id, update_fields)
             _invalidate_leads_cache()
             return {"ok": True, "message": "轻补搜完成", "data": enriched, "new_score": new_score}
@@ -5330,8 +5488,12 @@ async def _scheduled_leads_search():
             # 优化2&3：假线索/长标题产品页直接低分，跳过 Coze 评分节省调用
             if lead.get("_score_penalty"):
                 score = lead.get("score", 5)
+                page_type = _rule_guess_page_type(
+                    lead.get("website", ""), lead.get("page_title", ""), lead.get("page_snippet", ""))
+                buyer_type = _rule_guess_buyer_type(
+                    lead.get("website", ""), lead.get("page_title", ""), lead.get("page_snippet", ""))
             else:
-                score = await call_coze_scoring_workflow(lead)
+                score, page_type, buyer_type = await call_coze_scoring_workflow(lead)
                 lead["score"] = score
             fields = {
                 "线索标题": f"{lead.get('company_name', '')}（{lead.get('country', '')}）",
@@ -5357,6 +5519,8 @@ async def _scheduled_leads_search():
                 "决策人": "",
                 "LinkedIn": "",
                 "进口记录": "",
+                "页面类型": page_type or "unknown",
+                "买家类型": buyer_type or "unknown",
             }
             try:
                 resp = _feishu_api("POST", f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records", {"fields": fields})
