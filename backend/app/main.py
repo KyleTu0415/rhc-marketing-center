@@ -2997,6 +2997,21 @@ _FAKE_LEAD_PATTERNS = [
     # 预测报告类（未来年份 + Growth/Forecast）
     re.compile(r"(203[0-9]|202[6-9]).{0,15}(growth|forecast|projection)", re.I),
     re.compile(r"(growth|forecast|projection).{0,15}(203[0-9]|202[6-9])", re.I),
+    # 目录/列表/合集类
+    re.compile(r"^list\s+of", re.I),
+    re.compile(r"^top\s+\d+\s+", re.I),
+    re.compile(r"^\d+\s+best\s+", re.I),
+    re.compile(r"^\d+\s+top\s+", re.I),
+    # 通用导航页
+    re.compile(r"^our\s+distributors\b", re.I),
+    re.compile(r"^our\s+partners\b", re.I),
+    re.compile(r"^our\s+clients\b", re.I),
+    re.compile(r"^our\s+suppliers\b", re.I),
+    # 纯国家名标题（前后无其他有意义内容）
+    re.compile(r"^(chile|brazil|india|china|mexico|colombia|peru|ecuador)$", re.I),
+    # Wikipedia / 百科类
+    re.compile(r"wikipedia", re.I),
+    re.compile(r"^home\s*[-|]", re.I),
 ]
 
 # 标题长度检测关键词（优化3）
@@ -3027,12 +3042,37 @@ def _extract_company_info(title: str, snippet: str, url: str) -> dict:
     company = title.split("|")[0].split("-")[0].split(",")[0].split("–")[0].strip()
     # 去掉通用词
     for word in ["veterinary", "animal", "hospital", "equipment", "supplier",
-                  "importer", "distributor", "wholesale", "official"]:
-        company = company.replace(word, " ").strip()
+                  "importer", "distributor", "wholesale", "official",
+                  "manufacturer", "distributors", "suppliers", "manufacturers",
+                  "company", "companies", "corporation", "services", "solutions",
+                  "products", "international", "global", "worldwide"]:
+        company = company.replace(word, " ").replace("  ", " ").strip()
     company = re.sub(r'\s+', ' ', company).strip()
-    # 剥离后若只是纯产品短语（无品牌），尝试用域名品牌；域名也推不出则留空（上层丢弃）
-    if _is_product_phrase(company):
-        company = _brand_from_domain(url)
+    
+    # 剥离后若只是纯产品短语（无品牌）或空串，尝试用域名品牌
+    if _is_product_phrase(company) or len(company) < 2:
+        domain_brand = _brand_from_domain(url)
+        if domain_brand:
+            company = domain_brand
+        else:
+            company = ""
+    
+    # 如果公司名只有一个词且是常见通用词（如国家名），也尝试用域名
+    if company and company.lower() in _COUNTRY_NAMES_ONLY:
+        domain_brand = _brand_from_domain(url)
+        company = domain_brand if domain_brand else ""
+    
+    # 如果公司名以 "List of" / "Our " / "About " 等开头，尝试用域名
+    low_company = company.lower()
+    bad_company_starts = ("list of", "our ", "about ", "the ", "welcome",
+                          "home", "contact", "find ", "top ", "best ",
+                          "manufacturer of", "distributor of")
+    if any(low_company.startswith(p) for p in bad_company_starts):
+        domain_brand = _brand_from_domain(url)
+        if domain_brand:
+            company = domain_brand
+        else:
+            company = ""
 
     # 识别国家
     country = ""
@@ -3076,6 +3116,13 @@ _NON_COMPANY_TITLE_PREFIXES = (
     "register ", "sign up", "login", "log in", "exhibitor list",
     "exhibitor directory", "sponsor ", "become a", "apply ", "submission",
     "schedule", "agenda", "program", "welcome to", "home -", "homepage",
+    # 列表/目录/合集页
+    "list of", "list: ", "directory of", "catalog of", "catalogue of",
+    "top ", "best ", "leading ", "major ", "key ",
+    # 通用导航/站点页
+    "home", "our distributors", "our partners", "our clients",
+    "our suppliers", "our team", "our services", "our products",
+    "meet the", "meet our",
 )
 # 非公司主体页面的标题关键词（出现在标题任意位置即过滤）
 _NON_COMPANY_TITLE_KEYWORDS = (
@@ -3089,6 +3136,20 @@ _NON_COMPANY_TITLE_KEYWORDS = (
     # 展会官网泛页面（不是参展商公司）
     "exhibitors", "exhibitor list", "exhibitor directory",
     "press release", "career advice", "newsroom",
+    # 列表/目录/合集类
+    "list of", "directory of", "top 10", "top 20", "top 50", "top 100",
+    "best companies", "leading companies", "major companies",
+    # 新闻/博客/文章类
+    "news", "blog", "article", "journal", "magazine",
+    "press release", "announces", "announced",
+    # 招聘/维基/百科类
+    "wikipedia", "wiki", "linkedin company",
+    "hiring", "careers", "jobs", "job openings",
+    # 社交/视频平台
+    "facebook", "instagram", "youtube", "twitter", "tiktok",
+    # 市场报告/行业分析
+    "market report", "market analysis", "industry report", "industry analysis",
+    "market size", "market share", "market forecast",
 )
 
 
@@ -3768,15 +3829,18 @@ def _run_lead_search(max_results: int = 30) -> list:
     _deduped_raw = []
     for r in all_raw:
         _title = r.get("title", "")
-        # 复用 _extract_company_info 的公司名提取逻辑（取标题第一段）
-        _raw_company = _title.split("|")[0].split("-")[0].split(",")[0].split("–")[0].strip()
-        # 去掉通用词（与 _extract_company_info 保持一致）
-        for word in ["veterinary", "animal", "hospital", "equipment", "supplier",
-                      "importer", "distributor", "wholesale", "official"]:
-            _raw_company = _raw_company.replace(word, " ").strip()
-        _raw_company = re.sub(r'\s+', ' ', _raw_company).strip()
-        _company_key = _raw_company.lower().strip()
-        if not _company_key or _company_key in _internal_seen_companies:
+        _url = r.get("url", "")
+        # 用完整提取逻辑获取公司名（与下游保持一致）
+        _tmp_info = _extract_company_info(_title, r.get("snippet", ""), _url)
+        _company_key = (_tmp_info.get("company_name") or "").lower().strip()
+        # 公司名为空、太短、或清洗后为空的，直接丢弃
+        if not _company_key or len(_company_key) < 2:
+            _internal_dedup_drop += 1
+            continue
+        if not _clean_company_name(_company_key):
+            _internal_dedup_drop += 1
+            continue
+        if _company_key in _internal_seen_companies:
             _internal_dedup_drop += 1
             continue
         _internal_seen_companies.add(_company_key)
@@ -4623,32 +4687,89 @@ def _resend_send_mail(to_addrs, subject, body, cc, api_key) -> str:
 # ------------------------------------------------------------
 # 开发信生成：Coze 工作流优先，本地高质量英文模板兜底
 # ------------------------------------------------------------
+# 纯国家/地区名（不能当公司名）
+_COUNTRY_NAMES_ONLY = {
+    "chile", "china", "brazil", "india", "russia", "japan", "korea",
+    "germany", "france", "italy", "spain", "mexico", "argentina", "colombia",
+    "peru", "ecuador", "venezuela", "bolivia", "paraguay", "uruguay",
+    "panama", "costa rica", "guatemala", "honduras", "nicaragua", "el salvador",
+    "dominican republic", "cuba", "puerto rico", "haiti", "jamaica",
+    "united states", "usa", "us", "canada", "australia", "new zealand",
+    "united kingdom", "uk", "england", "scotland", "ireland", "wales",
+    "netherlands", "holland", "belgium", "switzerland", "austria", "poland",
+    "czech republic", "hungary", "romania", "bulgaria", "croatia", "serbia",
+    "greece", "turkey", "israel", "saudi arabia", "uae", "egypt",
+    "south africa", "nigeria", "kenya", "morocco", "tunisia",
+    "thailand", "vietnam", "indonesia", "malaysia", "philippines", "singapore",
+    "myanmar", "cambodia", "laos", "brunei", "east timor", "papua new guinea",
+    "pakistan", "bangladesh", "sri lanka", "nepal", "bhutan", "maldives",
+    "north america", "south america", "latin america", "europe", "asia",
+    "africa", "oceania", "middle east", "central america", "caribbean",
+    "southeast asia", "east asia", "south asia", "central asia",
+    "home", "about", "contact", "services", "products", "solutions",
+    "our distributors", "our partners", "our clients", "our suppliers",
+    "our team", "our story", "our mission", "our vision",
+}
+
 def _clean_company_name(raw: str) -> str:
     """清洗脏公司名：搜索词式短语（含多关键词/冒号/import等）不当公司名用，返回空串。
     真实公司名通常是 1-4 个词的专名，常见法律后缀 Ltd/Inc/LLC/GmbH/S.A./Corp 等。"""
     if not raw:
         return ""
     name = raw.strip()
-    low = name.lower()
-    # 明显是搜索词/句子的特征
+    low = name.lower().strip()
+    
+    # 0. 纯国家/地区名/通用导航词 → 直接拒绝
+    if low in _COUNTRY_NAMES_ONLY:
+        return ""
+    
+    # 1. 明显是搜索词/句子的特征
     bad_markers = (":", "：", " import ", " import,", " company:", " companies ",
                    " supplier", " manufacturers ", " for sale", " price", " buy ",
-                   " wholesale", " distributor of", " looking for", " wanted")
+                   " wholesale", " distributor of", " looking for", " wanted",
+                   " manufacturer of", " list of", " list:", " directory of",
+                   " top 10", " top 20", " top 50", " top 100",
+                   " and more", " and other", " etc.", " and beyond",
+                   " in the world", " in the us", " in the uk")
     if any(m in low for m in bad_markers):
         return ""
-    # 中文整句（含多个中文且无法律后缀）多半是搜索词
+    
+    # 2. 以通用词开头且整体不像公司名的模式
+    bad_starts = ("list of", "list:", "directory of", "catalog of",
+                  "manufacturer of", "distributor of", "supplier of",
+                  "wholesale", "importer of", "exporter of",
+                  "home", "about us", "contact us", "our",
+                  "welcome to", "visit our", "find a", "find your",
+                  "top 10", "top 20", "top 50", "top 100",
+                  "best veterinary", "leading veterinary", "top veterinary")
+    if any(low.startswith(p) for p in bad_starts):
+        return ""
+    
+    # 3. 中文整句（含多个中文且无法律后缀）多半是搜索词
     legal_suffix = ("ltd", "inc", "llc", "gmbh", "corp", "co.", "company", "s.a",
                     "s.a.", "sa ", "limited", "co.,", "group", "holdings", "importadora",
                     "comercio", "medical", "vet", "hospital", "clinic", "laboratorio",
-                    "laboratories", "health", "healthcare", "animal", "pet", "pharm")
+                    "laboratories", "health", "healthcare", "animal", "pet", "pharm",
+                    "veterinary", "pharma", "biotech", "sciences", "technologies",
+                    "international", "trading")
     has_cjk = bool(re.search(r"[\u4e00-\u9fff]", name))
     cjk_count = len(re.findall(r"[\u4e00-\u9fff]", name))
     if has_cjk and cjk_count >= 4 and not any(s in low for s in legal_suffix):
         return ""
-    # 词数过多（>6）且无法律后缀，视为描述性短语
+    
+    # 4. 词数过多（>6）且无法律后缀，视为描述性短语
     words = re.findall(r"[A-Za-z0-9\.]+", name)
     if len(words) > 6 and not any(s in low for s in legal_suffix):
         return ""
+    
+    # 5. 只有1个词且不是常见公司名缩写形式（如 Corp., Inc.），太短不像公司名
+    if len(words) == 1 and len(low) <= 3 and not low.endswith(("." ,)):
+        return ""
+    
+    # 6. 纯产品/行业描述词，没有任何品牌专名
+    if _is_product_phrase(name):
+        return ""
+    
     return name[:80]
 
 
