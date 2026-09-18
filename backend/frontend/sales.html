@@ -3363,7 +3363,20 @@ function searchNewLeads() {
       return;
     }
     countEl.textContent='本轮新增 '+leads.length+' 条线索 · 下次搜索时将自动进入公海池';
-    var html='';
+    var st=data.stats||{};
+    var dropParts=[];
+    if(st.secondhand_dropped) dropParts.push('二手 '+st.secondhand_dropped);
+    if(st.manufacturer_dropped) dropParts.push('工厂卖家 '+st.manufacturer_dropped);
+    if(st.seller_dropped) dropParts.push('货架/分类页 '+st.seller_dropped);
+    if(st.non_company_dropped) dropParts.push('非公司页 '+st.non_company_dropped);
+    if(st.dirty_dropped) dropParts.push('无效名称 '+st.dirty_dropped);
+    var auditHtml='';
+    if(dropParts.length){
+      auditHtml='<div style="grid-column:1/-1;font-size:12px;color:#888;margin:-4px 0 2px">本轮共扫描 '
+        +(st.raw_results||st.total_found||0)+' 条原始结果，已自动过滤：'+dropParts.join('、')
+        +'（共 '+(st.queries||0)+' 个关键词）</div>';
+    }
+    var html=auditHtml;
     for(var i=0;i<leads.length;i++){ html+=renderLeadCard(leads[i],'public'); }
     list.innerHTML=html;
     publicPoolCache=null;

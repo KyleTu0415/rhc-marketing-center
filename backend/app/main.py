@@ -710,6 +710,9 @@ LEADS_FIELD_MAP = {
     "最近发信时间": "最近发信时间",
     "发信次数": "发信次数",
     "入池时间": "入池时间",
+    "页面类型": "页面类型",
+    "买家类型": "买家类型",
+    "系统排除": "系统排除",
 }
 LEAD_ACTIVE_STATUS = ("跟进中", "已转客户")
 LEAD_STATUS_OPTIONS = ("跟进中", "已转客户", "已释放")
@@ -828,7 +831,24 @@ LEADS_FIELDS_SCHEMA = [
     {"field_name": "入池时间", "type": 1},
     {"field_name": "页面类型", "type": 1},   # 文本：company/directory/b2b_platform/news_report/navigation/competitor/unknown
     {"field_name": "买家类型", "type": 1},   # 文本：importer/distributor/wholesaler/dealer/hospital/clinic/manufacturer/unknown（用文本避免单选枚举置空）
+    {"field_name": "系统排除", "type": 1},   # 文本：AI/规则判定非买家时写排除原因（如 ai:not_company），公海池过滤；留空=正常。只标记不删除，可回滚
 ]
+
+
+# 非真实买家的 AI 分类结果：命中即系统排除（移出公海池，仅标记不删除）
+_EXCLUDE_PAGE_TYPES = ("directory", "b2b_platform", "news_report", "navigation", "competitor")
+
+
+def _ai_exclude_reason(page_type: str, buyer_type: str) -> str:
+    """根据 AI 分类返回系统排除原因；属于真实买家返回空串。"""
+    pt = (page_type or "").strip().lower()
+    bt = (buyer_type or "").strip().lower()
+    if pt in _EXCLUDE_PAGE_TYPES:
+        return f"ai:{pt}"
+    # 制造商/工厂是同行卖家而非采购方（company 页但 buyer_type=manufacturer 也排除）
+    if bt == "manufacturer":
+        return "ai:manufacturer"
+    return ""
 
 
 def _ensure_leads_fields(tid):
@@ -2854,6 +2874,12 @@ _JUNK_HOST_MARKS = (
     "bizearch", "companylist", "hotfrog", "cylex", "brownbook", "findyello",
     # 电商 / 零售平台
     "amazon.", "ebay.", "etsy.com", "aliexpress.com", "walmart.com",
+    # 二手设备交易平台 / 分类信息广告
+    "equipnet.com", "3diequipment.com", "intriquip.com", "usedvetequipment.com",
+    "gumtree.", "quoka.", "craigslist.org", "facebook.com/marketplace",
+    # 通用兽医供应商目录/黄页（非单一公司主体）
+    "vetsuppliersdirectory", "suppliersdirectory",
+    "veterinarydirectory", "vetdirectory",
     # 社媒 / 内容 / 论坛
     "linkedin.com", "facebook.com", "instagram.com", "youtube.com", "youtu.be",
     "twitter.com", "x.com", "tiktok.com", "pinterest.com", "reddit.com",
@@ -2875,7 +2901,12 @@ def _is_junk_result_url(url: str) -> bool:
         return True
     if not host:
         return True
-    return any(mark in host for mark in (_JUNK_HOST_MARKS + _COMPETITOR_HOST_MARKS))
+    if any(mark in host for mark in (_JUNK_HOST_MARKS + _COMPETITOR_HOST_MARKS)):
+        return True
+    # 域名本身即目录/黄页站（如 vetsuppliersdirectory.com.au、xxx-directory.net），非单一公司主体
+    if "directory" in host:
+        return True
+    return False
 
 
 def _filter_junk_results(results: list):
@@ -3002,6 +3033,10 @@ _SELLER_PATH_MARKS = (
     "/product-category/", "/product-categories/", "/collections/",
     "/shop/", "/store/", "/cart", "/checkout", "/wishlist",
     "/item/", "/goods/", "/categoria/", "/categorias/", "/produto/", "/produtos/",
+    # 通用分类/栏目页（equipnet.com/category/... 这类二手/零售平台的商品聚合页）
+    "/category/", "/categories/",
+    # 二手设备站点的二手专区路径
+    "/used/", "/used-equipment", "/second-hand/", "/secondhand/", "/pre-owned/", "/preowned/",
 )
 
 # 子域名中的电商/产品站特征（如 products.covetrus.com, shop.example.com）
@@ -3025,6 +3060,77 @@ def _is_seller_or_section_url(url: str) -> bool:
     except Exception:
         pass
     return False
+
+
+# 二手/翻新设备：标题或URL命中即判为二手交易页（只看标题与URL，不看摘要，避免 "systems used by vets" 误杀）
+_SECONDHAND_TITLE_RE = re.compile(
+    r"(?:\bused\b\s+(?:vet(?:erinary)?|medical|animal|an[aes]+the[sz]ia|surgical|pharma\w*|equipment|machine|device|system)"
+    r"|\bsecond[\s\-]?hand\b|\bpre[\s\-]?owned\b|\brefurbished\b|used\s+vet\s+equipment|"
+    r"vehicles\s+and\s+vet\s+boxes)",
+    re.I,
+)
+
+
+def _is_secondhand_result(url: str, title: str) -> bool:
+    t = (title or "").lower()
+    if _SECONDHAND_TITLE_RE.search(title or ""):
+        return True
+    u = (url or "").lower().split("?")[0]
+    # URL 中二手语义段：usedvetequipment.com、/used/、/second-hand/、?used-medical 等
+    if re.search(r"(^|[/.\-])used([/.\-]|vet|medical|equipment|machine)", u):
+        return True
+    if re.search(r"second[\-]?hand|pre[\-]?owned|refurbished", u):
+        return True
+    return False
+
+
+# 工厂/制造商卖家：标题以工厂身份自述（同行卖家，非采购方）。保守匹配，避免误伤正文提及工厂的买家。
+_MANUFACTURER_TITLE_RE = re.compile(
+    r"(?:manufacturer\s*[/|·-]?\s*(?:company|factory|supplier)"
+    r"|supplies?\s+manufacturer|factory\s*[/|]\s*(?:company|manufacturer))",
+    re.I,
+)
+
+
+def _is_manufacturer_title(title: str) -> bool:
+    return bool(_MANUFACTURER_TITLE_RE.search(title or ""))
+
+
+# 国家/地区域名后缀 → 国家英文名（仅在标题/摘要识别不到国家时兜底补全，不用于硬过滤）
+_TLD_COUNTRY_MAP = {
+    ".co.za": "South Africa", ".com.au": "Australia", ".co.ke": "Kenya",
+    ".com.br": "Brazil", ".com.mx": "Mexico", ".com.ar": "Argentina",
+    ".co.uk": "United Kingdom", ".ac.uk": "United Kingdom",
+    ".de": "Germany", ".fr": "France", ".es": "Spain", ".it": "Italy",
+    ".nl": "Netherlands", ".pl": "Poland", ".pt": "Portugal",
+    ".vn": "Vietnam", ".th": "Thailand", ".co.id": "Indonesia",
+    ".com.ph": "Philippines", ".com.sg": "Singapore", ".com.my": "Malaysia",
+    ".co.nz": "New Zealand", ".ca": "Canada", ".com.tr": "Turkey",
+    ".ae": "United Arab Emirates", ".sa": "Saudi Arabia", ".eg": "Egypt",
+    ".com.ng": "Nigeria", ".co.in": "India", ".jp": "Japan", ".kr": "South Korea",
+    ".cl": "Chile", ".com.co": "Colombia", ".com.pe": "Peru", ".com.ec": "Ecuador",
+    ".com.uy": "Uruguay", ".com.py": "Paraguay", ".com.bo": "Bolivia",
+}
+
+
+def _country_from_tld(url: str) -> str:
+    """从域名后缀兜底识别国家；识别不到返回空串。只补全、不过滤。"""
+    from urllib.parse import urlparse
+    try:
+        host = urlparse(url).netloc.lower().split(":")[0]
+    except Exception:
+        return ""
+    if not host:
+        return ""
+    # 先匹配多级后缀（.co.za 等），再回退单级 ccTLD
+    for suffix, country in _TLD_COUNTRY_MAP.items():
+        if host.endswith(suffix):
+            return country
+    m = re.search(r"\.([a-z]{2})$", host)
+    if m:
+        two = "." + m.group(1)
+        return _TLD_COUNTRY_MAP.get(two, "")
+    return ""
 
 
 
@@ -3183,7 +3289,7 @@ _NON_COMPANY_TITLE_KEYWORDS = (
     "exhibitors", "exhibitor list", "exhibitor directory",
     "press release", "career advice", "newsroom",
     # 列表/目录/合集类
-    "list of", "directory of", "top 10", "top 20", "top 50", "top 100",
+    "list of", "directory of", "directory", "top 10", "top 20", "top 50", "top 100",
     "best companies", "leading companies", "major companies",
     # 新闻/博客/文章类
     "news", "blog", "article", "journal", "magazine",
@@ -3777,6 +3883,11 @@ async def _enrich_all_leads_async(new_leads: list):
             if buyer_type:
                 upd["买家类型"] = buyer_type
                 lead["buyer_type"] = buyer_type
+            # 分类闸门：补搜后重评分若判为非买家/同行，同样标记系统排除
+            _ex = _ai_exclude_reason(page_type, buyer_type)
+            if _ex:
+                upd["系统排除"] = _ex
+                lead["_system_excluded"] = _ex
             _update_leads_record(record_id, upd)
         except Exception as e:
             print(f"[enrich] 重评分失败 ({lead.get('company_name')}): {e}")
@@ -4003,19 +4114,31 @@ def _run_lead_search(max_results: int = 30) -> list:
     seen_companies = set()
     dirty_dropped = 0  # 脏公司名（搜索词短语）被过滤的条数
     seller_dropped = 0  # 同行卖家货架页被过滤的条数
+    secondhand_dropped = 0  # 二手/翻新设备页被过滤的条数
+    manufacturer_dropped = 0  # 工厂/制造商卖家标题被过滤的条数
     non_company_dropped = 0  # 非公司主体页面（展会联系页/活动页）被过滤的条数
     # 搜索引擎名称（用于来源字段）
     engine_name = "Brave搜索" if use_brave else "DuckDuckGo搜索"
     for r in all_raw:
+        _r_url = r.get("url", "")
+        _r_title = r.get("title", "")
         # 电商货架/购物路径（如 /product-category/...）是同行卖家商品页，不是买家主体，丢弃
-        if _is_seller_or_section_url(r.get("url", "")):
+        if _is_seller_or_section_url(_r_url):
             seller_dropped += 1
             continue
+        # 二手/翻新设备交易页，入池前直接丢弃（搜索引擎负词挡不住 "used + 插词 + equipment"）
+        if _is_secondhand_result(_r_url, _r_title):
+            secondhand_dropped += 1
+            continue
+        # 工厂/制造商自述标题（同行卖家，非采购方），直接丢弃；其余制造商交由 AI 分类闸门兜底
+        if _is_manufacturer_title(_r_title):
+            manufacturer_dropped += 1
+            continue
         # 展会联系页/活动页/目录页等非公司主体页面，丢弃
-        if _is_non_company_title(r.get("title", "")):
+        if _is_non_company_title(_r_title):
             non_company_dropped += 1
             continue
-        info = _extract_company_info(r["title"], r.get("snippet", ""), r["url"])
+        info = _extract_company_info(_r_title, r.get("snippet", ""), _r_url)
         if not info["company_name"] or len(info["company_name"]) < 3:
             dirty_dropped += 1
             continue
@@ -4028,11 +4151,14 @@ def _run_lead_search(max_results: int = 30) -> list:
         if company_key in seen_companies:
             continue
         seen_companies.add(company_key)
+        # TLD 后缀兜底补国家：标题/正文没识别出国家时，用域名后缀推断（只补全，不硬过滤）
+        _lead_country = info["country"] or _country_from_tld(_r_url)
+        _lead_region = info["region"] or _SEARCH_COUNTRIES.get(_lead_country, "其他")
         grade = _rate_lead_quality(info)
         lead = {
             "company_name": info["company_name"],
-            "country": info["country"] or "未知",
-            "region": info["region"] or "其他",
+            "country": _lead_country or "未知",
+            "region": _lead_region or "其他",
             "product_demand": info["product_demand"],
             "recommended_product": _recommend_product(info["product_demand"]),
             "website": r["url"],
@@ -4073,6 +4199,7 @@ def _run_lead_search(max_results: int = 30) -> list:
     _lead_search_diag["ts"] = time.time()
     print(f"[search] 搜索诊断: 查询{min(len(queries), max_queries)}轮, "
           f"原始结果{len(all_raw)}条, 脏名过滤{dirty_dropped}条, 卖家页过滤{seller_dropped}条, "
+          f"二手过滤{secondhand_dropped}条, 工厂卖家过滤{manufacturer_dropped}条, "
           f"非公司页过滤{non_company_dropped}条, "
           f"有效线索{len(leads)}条, "
           f"连续空轮次{empty_rounds}, 引擎状态={_lead_search_diag['engine_status']}, "
@@ -4081,9 +4208,12 @@ def _run_lead_search(max_results: int = 30) -> list:
     try:
         leads._search_diag = {
             "queries": min(len(queries), max_queries),
+            "query_list": queries[:max_queries],
             "raw_results": len(all_raw),
             "dirty_dropped": dirty_dropped,
             "seller_dropped": seller_dropped,
+            "secondhand_dropped": secondhand_dropped,
+            "manufacturer_dropped": manufacturer_dropped,
             "non_company_dropped": non_company_dropped,
             "valid_leads": len(leads),
             "empty_rounds": empty_rounds,
@@ -4300,6 +4430,14 @@ def _run_lead_search_job(max_results: int = 30):
                                               "买家类型": buyer_type or "unknown"}
                                 if not lead.get("_score_penalty"):
                                     upd_fields["综合评分"] = lead.get("score", 0)
+                                # 分类闸门：非买家/同行 → 标记系统排除（只标记不删除，公海池过滤）
+                                # 假线索分支是规则粗判，原因用 rule: 前缀；Coze 分支用 ai: 前缀
+                                _ex = _ai_exclude_reason(page_type, buyer_type)
+                                if _ex:
+                                    _prefix = "rule:" if lead.get("_score_penalty") else "ai:"
+                                    _reason = _prefix + _ex.split(":", 1)[-1]
+                                    upd_fields["系统排除"] = _reason
+                                    lead["_system_excluded"] = _reason
                                 _feishu_api(
                                     "PUT",
                                     f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records/{lead['_record_id']}",
@@ -4394,6 +4532,13 @@ def _run_lead_search_job(max_results: int = 30):
                 "a_grade": a_count,
                 "b_grade": b_count,
                 "c_grade": c_count,
+                "raw_results": search_diag.get("raw_results", 0),
+                "secondhand_dropped": search_diag.get("secondhand_dropped", 0),
+                "manufacturer_dropped": search_diag.get("manufacturer_dropped", 0),
+                "seller_dropped": search_diag.get("seller_dropped", 0),
+                "non_company_dropped": search_diag.get("non_company_dropped", 0),
+                "dirty_dropped": search_diag.get("dirty_dropped", 0),
+                "queries": search_diag.get("queries", 0),
             },
             "search_time": datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S"),
         }
@@ -5368,6 +5513,9 @@ async def api_leads_public(request: Request):
         cutoff = (now - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
         leads = []
         for ld in all_leads:
+            # AI/规则判定为非买家（目录/平台/新闻/导航/同行制造商）的记录只标记不删除，公海池不展示
+            if (ld.get("系统排除") or "").strip():
+                continue
             pool_time = (ld.get("入池时间") or "").strip()
             if pool_time and pool_time >= cutoff:
                 leads.append(ld)
@@ -5529,6 +5677,9 @@ async def api_leads_enrich(record_id: str, req: Optional[EnrichLeadRequest] = No
                 update_fields["页面类型"] = page_type
             if buyer_type:
                 update_fields["买家类型"] = buyer_type
+            _ex = _ai_exclude_reason(page_type, buyer_type)
+            if _ex:
+                update_fields["系统排除"] = _ex
             _update_leads_record(record_id, update_fields)
             _invalidate_leads_cache()
             return {"ok": True, "message": "轻补搜完成", "data": enriched, "new_score": new_score}
@@ -5608,6 +5759,9 @@ async def _scheduled_leads_search():
                 "页面类型": page_type or "unknown",
                 "买家类型": buyer_type or "unknown",
             }
+            _ex = _ai_exclude_reason(page_type, buyer_type)
+            if _ex:
+                fields["系统排除"] = ("rule:" + _ex.split(":", 1)[-1]) if lead.get("_score_penalty") else _ex
             try:
                 resp = _feishu_api("POST", f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records", {"fields": fields})
                 record_id = resp.get("data", {}).get("record", {}).get("record_id", "")
