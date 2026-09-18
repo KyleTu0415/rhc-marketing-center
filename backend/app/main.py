@@ -3136,6 +3136,8 @@ _SELLER_PATH_MARKS = (
     "/item/", "/goods/", "/categoria/", "/categorias/", "/produto/", "/produtos/",
     # 通用分类/栏目页（equipnet.com/category/... 这类二手/零售平台的商品聚合页）
     "/category/", "/categories/",
+    # 厂商/网站的"找经销商/分销商"栏目页（是厂家招商页，不是买家主体）
+    "/distributors/", "/dealers/", "/resellers/",
     # 二手设备站点的二手专区路径
     "/used/", "/used-equipment", "/second-hand/", "/secondhand/", "/pre-owned/", "/preowned/",
 )
@@ -3147,7 +3149,11 @@ _SELLER_SUBDOMAIN_MARKS = (
 
 
 def _is_seller_or_section_url(url: str) -> bool:
-    u = (url or "").lower().split("?")[0].rstrip("/")
+    # 去掉查询串后统一补一个结尾斜杠：栏目根 URL（如 /distributors/、/used/）经 rstrip 会丢斜杠
+    # 而漏判，故改成"保证有结尾斜杠"，使 /xxx/ 段标记既能匹配栏目根也能匹配其子路径
+    u = (url or "").lower().split("?")[0]
+    if not u.endswith("/"):
+        u += "/"
     # 检查路径
     if any(mark in u for mark in _SELLER_PATH_MARKS):
         return True
@@ -3161,6 +3167,56 @@ def _is_seller_or_section_url(url: str) -> bool:
     except Exception:
         pass
     return False
+
+
+# 政府/教育等非买家主体的公共部门二级域（仅对两位字母国家后缀做组合判断，避免误伤 go.com 这类商业站）
+_GOV_EDU_SLD = {"gov", "go", "gob", "gouv", "govt", "mil", "edu", "ac"}
+# 官方贸易/出口指南路径特征（如 trade.gov/country-commercial-guides/...-distribution-sales-channels）
+_TRADE_GUIDE_MARKS = (
+    "country-commercial-guides", "country-commercial-guide",
+    "distribution-sales-channels", "trade.gov/",
+)
+
+
+def _is_gov_edu_result(url: str) -> bool:
+    """政府/军队/教育/官方贸易指南页：不是买家公司主体，命中即丢弃。
+    判定只看域名后缀（.gov/.gov.xx/.edu/.edu.xx/.ac.xx/.go.xx/.gob.xx/.gouv.xx/.mil）
+    与官方指南路径，不看正文，避免误判提到政府的正常公司。"""
+    u = (url or "").lower().split("?")[0]
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(u).netloc.lower().split(":")[0]
+        labels = [p for p in host.split(".") if p]
+        if len(labels) >= 2:
+            tld = labels[-1]
+            sld = labels[-2]
+            if tld in ("gov", "mil", "edu"):           # .gov / .mil / .edu 直接命中
+                return True
+            # 两位国家后缀 + gov/go/gob/gouv/govt/mil/edu/ac 二级域
+            if len(tld) == 2 and tld.isalpha() and sld in _GOV_EDU_SLD:
+                return True
+    except Exception:
+        pass
+    # 官方出口/贸易指南页（trade.gov 的 country-commercial-guides）
+    path = u.split("://", 1)[-1]
+    if any(m in path for m in _TRADE_GUIDE_MARKS):
+        return True
+    return False
+
+
+# B2B 撮合/电商平台标题自述（是平台而非单一买家公司）。只看标题，不看正文（正文常出现 platform 一词）。
+_PLATFORM_TITLE_RE = re.compile(
+    r"(?:b2b\s+(?:marketplace|platform|portal)|business[\s-]to[\s-]business\s+(?:platform|marketplace)|"
+    r"(?:medical|health(?:care)?|veterinary|vet|animal|pharma(?:ceutical)?|online)\s+marketplace\b|"
+    r"\bmarketplace\s+for\b|\bnumber\s+one\s+\w+\s+marketplace\b|"
+    r"online\s+trading\s+platform|procurement\s+portal|tender\s+portal)",
+    re.I,
+)
+
+
+def _is_platform_title(title: str) -> bool:
+    """标题自述为 B2B/电商撮合平台或采购门户（非单一买家）→ True。"""
+    return bool(title and _PLATFORM_TITLE_RE.search(title))
 
 
 # 二手/翻新设备：标题或URL命中即判为二手交易页（只看标题与URL，不看摘要，避免 "systems used by vets" 误杀）
@@ -4221,7 +4277,9 @@ def _run_lead_search(max_results: int = 30) -> list:
     leads = []
     seen_companies = set()
     dirty_dropped = 0  # 脏公司名（搜索词短语）被过滤的条数
-    seller_dropped = 0  # 同行卖家货架页被过滤的条数
+    seller_dropped = 0  # 同行卖家货架页/经销商栏目页被过滤的条数
+    gov_dropped = 0  # 政府/教育/官方贸易指南页被过滤的条数
+    platform_dropped = 0  # B2B/电商撮合平台页被过滤的条数
     secondhand_dropped = 0  # 二手/翻新设备页被过滤的条数
     manufacturer_dropped = 0  # 工厂/制造商卖家标题被过滤的条数
     non_company_dropped = 0  # 非公司主体页面（展会联系页/活动页）被过滤的条数
@@ -4230,9 +4288,17 @@ def _run_lead_search(max_results: int = 30) -> list:
     for r in all_raw:
         _r_url = r.get("url", "")
         _r_title = r.get("title", "")
-        # 电商货架/购物路径（如 /product-category/...）是同行卖家商品页，不是买家主体，丢弃
+        # 政府/军队/教育/官方贸易指南页（非买家主体），丢弃
+        if _is_gov_edu_result(_r_url):
+            gov_dropped += 1
+            continue
+        # 电商货架/购物路径/找经销商栏目（如 /product-category/...、/distributors/）不是买家主体，丢弃
         if _is_seller_or_section_url(_r_url):
             seller_dropped += 1
+            continue
+        # 标题自述为 B2B/电商撮合平台或采购门户（非单一买家），丢弃
+        if _is_platform_title(_r_title):
+            platform_dropped += 1
             continue
         # 二手/翻新设备交易页，入池前直接丢弃（搜索引擎负词挡不住 "used + 插词 + equipment"）
         if _is_secondhand_result(_r_url, _r_title):
@@ -4306,7 +4372,8 @@ def _run_lead_search(max_results: int = 30) -> list:
     leads.sort(key=lambda x: grade_order.get(x.get("confidence", "C"), 3))
     _lead_search_diag["ts"] = time.time()
     print(f"[search] 搜索诊断: 查询{min(len(queries), max_queries)}轮, "
-          f"原始结果{len(all_raw)}条, 脏名过滤{dirty_dropped}条, 卖家页过滤{seller_dropped}条, "
+          f"原始结果{len(all_raw)}条, 脏名过滤{dirty_dropped}条, 政府/教育页过滤{gov_dropped}条, "
+          f"平台页过滤{platform_dropped}条, 卖家页过滤{seller_dropped}条, "
           f"二手过滤{secondhand_dropped}条, 工厂卖家过滤{manufacturer_dropped}条, "
           f"非公司页过滤{non_company_dropped}条, "
           f"有效线索{len(leads)}条, "
@@ -4320,6 +4387,8 @@ def _run_lead_search(max_results: int = 30) -> list:
             "raw_results": len(all_raw),
             "dirty_dropped": dirty_dropped,
             "seller_dropped": seller_dropped,
+            "gov_dropped": gov_dropped,
+            "platform_dropped": platform_dropped,
             "secondhand_dropped": secondhand_dropped,
             "manufacturer_dropped": manufacturer_dropped,
             "non_company_dropped": non_company_dropped,
@@ -4641,6 +4710,8 @@ def _run_lead_search_job(max_results: int = 30):
                 "b_grade": b_count,
                 "c_grade": c_count,
                 "raw_results": search_diag.get("raw_results", 0),
+                "gov_dropped": search_diag.get("gov_dropped", 0),
+                "platform_dropped": search_diag.get("platform_dropped", 0),
                 "secondhand_dropped": search_diag.get("secondhand_dropped", 0),
                 "manufacturer_dropped": search_diag.get("manufacturer_dropped", 0),
                 "seller_dropped": search_diag.get("seller_dropped", 0),

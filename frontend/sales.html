@@ -3388,6 +3388,8 @@ function searchNewLeads() {
     countEl.textContent='本轮新增 '+leads.length+' 条线索 · 下次搜索时将自动进入公海池';
     var st=data.stats||{};
     var dropParts=[];
+    if(st.gov_dropped) dropParts.push('政府/教育页 '+st.gov_dropped);
+    if(st.platform_dropped) dropParts.push('B2B平台 '+st.platform_dropped);
     if(st.secondhand_dropped) dropParts.push('二手 '+st.secondhand_dropped);
     if(st.manufacturer_dropped) dropParts.push('工厂卖家 '+st.manufacturer_dropped);
     if(st.seller_dropped) dropParts.push('货架/分类页 '+st.seller_dropped);
