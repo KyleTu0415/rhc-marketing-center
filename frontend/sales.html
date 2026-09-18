@@ -479,9 +479,6 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
     <section class="page active" id="page-signals">
     <div class="page-header">
       <div><h2>商机信号</h2><p>点击「搜索新线索」主动发现潜在客户；搜索结果将在下次搜索时自动进入公海池</p></div>
-      <div class="page-header-actions">
-        <button class="btn btn-primary" onclick="searchNewLeads()">🔍 搜索新线索</button>
-      </div>
     </div>
     <!-- Search Results Area -->
     <div class="card" id="search-results-card" style="display:none">
@@ -497,6 +494,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
       <div class="card-header" style="flex-wrap:wrap;gap:8px 16px;justify-content:space-between;align-items:center">
         <h3>公海线索池</h3>
         <span class="card-sub sig-stats" id="public-pool-stats">加载中…</span>
+        <button class="btn btn-primary btn-sm" onclick="searchNewLeads()" style="margin-left:8px">🔍 搜索新线索</button>
       </div>
       <div class="card-body">
         <div id="public-pool-list">
