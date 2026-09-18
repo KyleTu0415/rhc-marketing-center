@@ -2621,7 +2621,9 @@ _SEARCH_CACHE_TTL = 30  # 搜索结果30秒缓存
 
 
 def _build_search_queries():
-    """构建搜索词列表：通用搜索用高意图关键词（importer/distributor/hospital + 目标市场）"""
+    """构建搜索词列表：通用搜索用高意图关键词（importer/distributor/hospital + 目标市场）
+    每次调用时随机打乱顺序，保证多轮搜索能发现不同线索。"""
+    import random
     queries = []
 
     # ===== 高意图通用搜索 =====
@@ -2637,6 +2639,19 @@ def _build_search_queries():
     for country in list(_SEARCH_COUNTRIES.keys())[:10]:
         queries.append(f'veterinary hospital equipment supplier {country}')
         queries.append(f'veterinary clinic supply {country}')
+
+    # ===== 补充多样化查询（扩展覆盖面） =====
+    # 制造商/供应商搜索
+    for product in _SEARCH_PRODUCTS[:3]:
+        for country in random.sample(list(_SEARCH_COUNTRIES.keys()), min(6, len(_SEARCH_COUNTRIES))):
+            queries.append(f'"{product}" supplier OR manufacturer {country}')
+    # 采购/经销相关
+    for country in list(_SEARCH_COUNTRIES.keys())[4:14]:
+        queries.append(f'veterinary medical equipment dealer {country}')
+        queries.append(f'animal health products distributor {country}')
+
+    # 随机打乱顺序，每次搜索覆盖不同组合
+    random.shuffle(queries)
     return queries
 
 
@@ -2728,7 +2743,10 @@ def _brave_api_search(query: str, timeout: int = 8) -> list:
     key = os.environ.get("BRAVE_API_KEY", "").strip()
     if not key:
         raise RuntimeError("BRAVE_API_KEY 未配置")
-    qs = _up.urlencode({"q": query, "count": 10, "country": "US", "safesearch": "off"})
+    qs = _up.urlencode({
+        "q": query, "count": 20, "country": "US",
+        "safesearch": "off", "result_filter": "web",
+    })
     url = "https://api.search.brave.com/res/v1/web/search?" + qs
     code, body = _http_fetch(
         url,
@@ -2739,20 +2757,34 @@ def _brave_api_search(query: str, timeout: int = 8) -> list:
     if code != 200 or not body:
         raise RuntimeError(f"Brave http{code}")
     data = json.loads(body)
-    # Brave API 新版返回 mixed 字段而非 web 字段
+
+    # ① 优先取 web.results（标准路径）
     web_results = (data.get("web") or {}).get("results") or []
+
+    # ② 兜底：新版 mixed 引用结构 — mixed.main 条目通过 type+index 指向顶级数组
     if not web_results:
         mixed = data.get("mixed") or {}
         main_items = mixed.get("main") or []
-        if main_items:
-            # 诊断：打印 mixed.main 前2项结构
-            print(f"[brave-mixed] query={query[:60]} main_len={len(main_items)} sample={json.dumps(main_items[0], ensure_ascii=False)[:300]}")
         for item in main_items:
-            if item.get("type") == "web":
+            rtype = item.get("type", "")
+            idx = item.get("index")
+            section = (data.get(rtype) or {}).get("results") or []
+            if idx is not None and 0 <= idx < len(section):
+                web_results.append(section[idx])
+            else:
                 r = item.get("result") or {}
-                web_results.append(r)
+                if r.get("url") and r.get("title"):
+                    web_results.append(r)
+
+    # ③ 诊断：结果为空时打印完整响应结构（截断）
     if not web_results:
-        print(f"[brave-diag] query={query[:80]} code={code} response_keys={list(data.keys())} web={data.get('web')} mixed_keys={list((data.get('mixed') or {}).keys())}")
+        body_preview = body[:800] if body else "(empty)"
+        print(f"[brave-diag] query={query[:80]} code={code} "
+              f"response_keys={list(data.keys())} "
+              f"web_keys={list((data.get('web') or {}).keys()) if data.get('web') else 'None'} "
+              f"mixed_keys={list((data.get('mixed') or {}).keys())} "
+              f"body_preview={body_preview}")
+
     out = []
     for it in web_results:
         u = (it.get("url") or "").strip()
@@ -3647,6 +3679,35 @@ def _dedup_with_existing_leads(new_leads: list, existing_leads: list) -> list:
     return deduped
 
 
+def _build_deep_search_queries():
+    """当常规搜索去重后无新线索时，用更广泛的关键词组合补充搜索。"""
+    import random
+    extra = []
+    # 更宽泛的行业搜索
+    broad_terms = [
+        "veterinary equipment importer",
+        "animal hospital supplier",
+        "veterinary distributor",
+        "livestock equipment importer",
+        "pet clinic supplier",
+        "veterinary anesthesia supplier",
+        "veterinary monitor importer",
+        "animal health distributor",
+    ]
+    for term in broad_terms:
+        for country in random.sample(list(_SEARCH_COUNTRIES.keys()), min(4, len(_SEARCH_COUNTRIES))):
+            extra.append(f'{term} {country}')
+    # 行业展会/协会相关
+    extra.extend([
+        "veterinary equipment exhibitor trade show",
+        "veterinary medical devices association member",
+        "animal health industry directory",
+        "veterinary supply wholesale list",
+    ])
+    random.shuffle(extra)
+    return extra
+
+
 def _run_lead_search(max_results: int = 30) -> list:
     """执行主动搜索核心逻辑，返回结构化线索列表。
     诊断计数挂在返回列表对象的 _search_diag 属性上（列表可挂自定义属性）。"""
@@ -3657,8 +3718,9 @@ def _run_lead_search(max_results: int = 30) -> list:
     # 控制搜索轮次与节奏：Brave 免费档 1 QPS，轮次太多既慢又耗额度；
     # 免费回退(DDG)在机房第2个查询起即被限流，多发也无意义。
     use_brave = bool(os.environ.get("BRAVE_API_KEY", "").strip())
-    max_queries = min(len(queries), 20 if use_brave else 15)
+    max_queries = min(len(queries), 25 if use_brave else 15)
     gap = 1.1 if use_brave else 0.5
+    deep_search_triggered = False
     for i, query in enumerate(queries[:max_queries]):
         results = _search_ddg_leads(query, timeout=8 if use_brave else 6)
         if not results:
@@ -3679,6 +3741,26 @@ def _run_lead_search(max_results: int = 30) -> list:
         # 轮次间隔：Brave 遵守 1 QPS；免费引擎降低被封概率
         if i < max_queries - 1:
             time.sleep(gap)
+
+    # ===== 深度搜索兜底：首轮结果太少时，用更广泛的关键词补充 =====
+    if len(all_raw) < 5:
+        print(f"[search] 首轮结果不足({len(all_raw)}条)，启动深度搜索补充...")
+        deep_queries = _build_deep_search_queries()
+        max_deep = min(len(deep_queries), 10 if use_brave else 8)
+        for j, dq in enumerate(deep_queries[:max_deep]):
+            results = _search_ddg_leads(dq, timeout=8 if use_brave else 6)
+            for r in results:
+                url = r.get("url", "").lower().strip()
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    r["_query"] = dq
+                    all_raw.append(r)
+            if len(all_raw) >= max_results * 3:
+                break
+            if j < max_deep - 1:
+                time.sleep(gap)
+        if all_raw:
+            print(f"[search] 深度搜索补充后原始结果{len(all_raw)}条")
 
     # ===== 优化1：内部去重（按公司名，保留第一条） =====
     _internal_seen_companies = set()
