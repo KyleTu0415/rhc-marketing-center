@@ -2801,7 +2801,9 @@ function mcStatusTag(status){
   return '<span class="mc-status-tag '+cls+'">'+esc(status||'待开发')+'</span>';
 }
 
-function loadPublicPool(forceRefresh){
+function loadPublicPool(forceRefresh, _retryAttempt){
+  _retryAttempt = _retryAttempt||0;
+  var MAX_RETRY=4, RETRY_GAP=3000;
   var el=document.getElementById('public-pool-list');
   var stats=document.getElementById('public-pool-stats');
   // 缓存命中且未过期：直接渲染，零等待
@@ -2812,7 +2814,9 @@ function loadPublicPool(forceRefresh){
     startEnrichmentPolling();
     return;
   }
-  if(el)el.innerHTML='<div class="loading-state"><div class="spin"></div><div>正在加载公海线索…</div></div>';
+  if(el)el.innerHTML='<div class="loading-state"><div class="spin"></div><div>'
+    +(_retryAttempt>0?('服务重启中，正在自动重连（'+_retryAttempt+'/'+MAX_RETRY+'）…'):'正在加载公海线索…')
+    +'</div></div>';
   if(stats)stats.textContent='加载中…';
   fetch('/api/leads/public',{headers:authHeaders(),cache:'no-store'})
     .then(function(r){
@@ -2845,11 +2849,18 @@ function loadPublicPool(forceRefresh){
     })
     .catch(function(e){
       publicPoolLoaded=false;
+      // 网络/服务暂不可用（含部署重启窗口）：自动静默重试，不立刻弹失败
+      var msg=String(e&&e.message||'');
+      var retryable = msg!=='UNAUTHORIZED' && (_retryAttempt<MAX_RETRY);
+      if(retryable){
+        setTimeout(function(){ loadPublicPool(forceRefresh, _retryAttempt+1); }, RETRY_GAP);
+        return;
+      }
       if(el){
-        if(String(e&&e.message)==='UNAUTHORIZED'){
+        if(msg==='UNAUTHORIZED'){
           el.innerHTML='<div class="empty-state"><div class="es-icon">'+SIGNAL_ICON_WARN+'</div><div class="es-title">登录已过期</div><div class="es-desc">请先登录后查看公海线索。</div><div style="margin-top:14px"><a class="btn btn-primary btn-sm" href="login.html">去登录</a></div></div>';
         }else{
-          el.innerHTML='<div class="empty-state"><div class="es-icon">'+SIGNAL_ICON_WARN+'</div><div class="es-title">公海线索加载失败</div><div class="es-desc">可能是网络异常或服务暂不可用，请重试。</div><div style="margin-top:14px"><button class="btn btn-primary btn-sm" onclick="loadPublicPool(true)">重试加载</button></div></div>';
+          el.innerHTML='<div class="empty-state"><div class="es-icon">'+SIGNAL_ICON_WARN+'</div><div class="es-title">公海线索加载失败</div><div class="es-desc">可能是网络异常或服务暂不可用，请重试。</div><div style="margin-top:14px"><button class="btn btn-primary btn-sm" onclick="loadPublicPool(true,0)">重试加载</button></div></div>';
         }
       }
       if(stats)stats.textContent='';
@@ -3384,55 +3395,71 @@ function searchNewLeads() {
     loadPublicPool(true);
   }
 
-  // 1) 启动后台搜索任务（立即返回，不再长时间占用连接）
-  fetch('/api/leads/search', {
-    method:'POST',
-    headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
-    body:JSON.stringify({target_markets:['南美','非洲','欧洲','东南亚'], industry:'veterinary', limit:10})
-  })
-  .then(function(r){return r.json();})
-  .then(function(data){
-    if(!data || data.ok===false){
-      var msg=(data&&(data.message||data.error))||'请稍后重试';
-      resetBtn();
-      if((data&&data.status)==='busy' || msg.indexOf('进行中')>=0 || msg.indexOf('进行')>=0){
-        showFail('搜索进行中','上一轮搜索的后台评分/补搜尚未完成，请稍候再点一次查看结果。');
+  // 1) 启动后台搜索任务（立即返回）。部署重启窗口可能连接被拒/502/503，自动重连最多 5 次
+  var START_MAX_RETRY=5, START_GAP=3000, startAttempt=0;
+  function startSearch(){
+    fetch('/api/leads/search', {
+      method:'POST',
+      headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
+      body:JSON.stringify({target_markets:['南美','非洲','欧洲','东南亚'], industry:'veterinary', limit:10})
+    })
+    .then(function(r){
+      // 5xx：服务重启中，可重试；401/4xx/2xx 正常解析业务响应
+      if(r.status>=500){ throw new Error('HTTP_'+r.status); }
+      return r.json().catch(function(){ throw new Error('BAD_JSON'); });
+    })
+    .then(function(data){ handleStart(data); })
+    .catch(function(){
+      // fetch 连接级 reject（无响应）connErr 仍为 false，但也属于可重连错误
+      if(startAttempt<START_MAX_RETRY){
+        startAttempt++;
+        renderProgress('服务重启中，正在自动重连…', startAttempt, START_MAX_RETRY);
+        setTimeout(startSearch, START_GAP);
       }else{
-        showFail('搜索失败', msg);
+        resetBtn();
+        showFail('搜索失败','与服务器连接中断，已自动重连 '+START_MAX_RETRY+' 次仍未成功，请稍后再点一次（搜索结果不受影响）。');
       }
-      return;
-    }
-    // 命中缓存：直接返回结果
-    if(data.status==='finished'){ resetBtn(); finishSearch(data); return; }
-    // 已启动后台任务：进入轮询
-    renderProgress('已开始搜索…', 0, 0);
-    var elapsed=0, interval=2500, maxWait=300000;  // 最多等 5 分钟
-    var timer=setInterval(function(){
-      elapsed+=interval;
-      fetch('/api/leads/search/status', {headers:{'Authorization':'Bearer '+token}, cache:'no-store'})
-      .then(function(r){return r.json();})
-      .then(function(st){
-        if(!st){return;}
-        if(st.status==='finished'){
-          clearInterval(timer); resetBtn(); finishSearch(st);
-        }else if(st.status==='error'){
-          clearInterval(timer); resetBtn();
-          showFail('搜索失败', st.message||'后台搜索出错，请稍后重试');
-        }else if(st.status==='running'){
-          renderProgress(st.phase, st.done_queries||0, st.total_queries||0);
-          if(elapsed>=maxWait){
-            clearInterval(timer); resetBtn();
-            showFail('搜索仍在进行','本轮搜索耗时较长，仍在后台继续；请稍等 1 分钟后再点「搜索新线索」查看结果。');
-          }
+    });
+  }
+  function handleStart(data){
+      if(!data || data.ok===false){
+        var msg=(data&&(data.message||data.error))||'请稍后重试';
+        resetBtn();
+        if((data&&data.status)==='busy' || msg.indexOf('进行中')>=0 || msg.indexOf('进行')>=0){
+          showFail('搜索进行中','上一轮搜索的后台评分/补搜尚未完成，请稍候再点一次查看结果。');
+        }else{
+          showFail('搜索失败', msg);
         }
-      })
-      .catch(function(){ /* 单次轮询失败不致命，下一轮继续 */ });
-    }, interval);
-  })
-  .catch(function(){
-    resetBtn();
-    showFail('搜索失败','与服务器连接中断，请检查网络后重试（搜索结果不受影响，可稍后再点一次查看）');
-  });
+        return;
+      }
+      // 命中缓存：直接返回结果
+      if(data.status==='finished'){ resetBtn(); finishSearch(data); return; }
+      // 已启动后台任务：进入轮询
+      renderProgress('已开始搜索…', 0, 0);
+      var elapsed=0, interval=2500, maxWait=300000;  // 最多等 5 分钟
+      var timer=setInterval(function(){
+        elapsed+=interval;
+        fetch('/api/leads/search/status', {headers:{'Authorization':'Bearer '+token}, cache:'no-store'})
+        .then(function(r){return r.json();})
+        .then(function(st){
+          if(!st){return;}
+          if(st.status==='finished'){
+            clearInterval(timer); resetBtn(); finishSearch(st);
+          }else if(st.status==='error'){
+            clearInterval(timer); resetBtn();
+            showFail('搜索失败', st.message||'后台搜索出错，请稍后重试');
+          }else if(st.status==='running'){
+            renderProgress(st.phase, st.done_queries||0, st.total_queries||0);
+            if(elapsed>=maxWait){
+              clearInterval(timer); resetBtn();
+              showFail('搜索仍在进行','本轮搜索耗时较长，仍在后台继续；请稍等 1 分钟后再点「搜索新线索」查看结果。');
+            }
+          }
+        })
+        .catch(function(){ /* 单次轮询失败不致命，下一轮继续 */ });
+      }, interval);
+  }
+  startSearch();
 }
 
 
