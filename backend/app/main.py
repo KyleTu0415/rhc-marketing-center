@@ -2614,31 +2614,17 @@ _RHC_PRODUCTS = [
 # 策略：用高意图搜索词（含 importer/distributor/hospital/clinic）+ 目标市场
 # site: 仅保留 B2B 平台（MedicalExpo/Kompass 的搜索结果本身就是公司列表）
 
-_TARGET_SITES = [
-    # B2B平台（搜索结果本身就是公司/产品列表，噪音低）
-    {"domain": "medicalexpo.com", "name": "MedicalExpo", "type": "B2B",
-     "keywords": ["veterinary anesthesia", "veterinary ventilator", "veterinary equipment manufacturer"]},
-    {"domain": "kompass.com", "name": "Kompass", "type": "B2B",
-     "keywords": ["veterinary equipment", "animal health distributor", "veterinary medical device"]},
-]
+_TARGET_SITES = []  # B2B平台 site: 搜索结果多为产品/目录页而非真实公司，已弃用
 
 _search_results_cache = {"data": None, "ts": 0.0}
 _SEARCH_CACHE_TTL = 30  # 搜索结果30秒缓存
 
 
 def _build_search_queries():
-    """构建搜索词列表：
-    1. B2B平台 site: 精准搜索（噪音低，结果即公司）
-    2. 通用搜索用高意图关键词（importer/distributor/hospital + 目标市场）"""
+    """构建搜索词列表：通用搜索用高意图关键词（importer/distributor/hospital + 目标市场）"""
     queries = []
 
-    # ===== 第一阶段：B2B平台精准搜索 =====
-    for site in _TARGET_SITES:
-        domain = site["domain"]
-        for kw in site["keywords"]:
-            queries.append(f'site:{domain} {kw}')
-
-    # ===== 第二阶段：高意图通用搜索 =====
+    # ===== 高意图通用搜索 =====
     # 核心产品 + importer + 目标市场（最直接的客户线索）
     for product in _SEARCH_PRODUCTS[:4]:
         for country in list(_SEARCH_COUNTRIES.keys())[:6]:
@@ -2757,6 +2743,7 @@ def _brave_api_search(query: str, timeout: int = 8) -> list:
     web_results = (data.get("web") or {}).get("results") or []
     if not web_results:
         print(f"[brave-diag] query={query[:80]} code={code} response_keys={list(data.keys())} web={data.get('web')}")
+    out = []
     for it in web_results:
         u = (it.get("url") or "").strip()
         t = (it.get("title") or "").strip()
