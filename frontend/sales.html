@@ -294,9 +294,9 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
 .score-green{background:#E6F9F1;color:#0D7B57}
 .score-gray{background:#F0F2F3;color:#637089}
 .claim-tag{font-size:12px;font-weight:700;color:var(--color-primary);white-space:nowrap}
-/* 公海池窄版卡片布局 */
+/* 公海池窄版卡片布局 - 一行一条，宽度1/3 */
 .lead-public-grid{display:flex;flex-direction:column;gap:8px}
-.lead-public-grid .lead-public-card{width:33%;min-width:320px;max-width:400px;margin-bottom:0}
+.lead-public-grid .lead-public-card{width:33.333%;min-width:280px;margin-bottom:0}
 /* 专业B2B客户卡片 - 紧凑三行布局 */
 .lead-public-card{padding:10px 14px;border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface);transition:box-shadow var(--transition-fast),border-color var(--transition-fast)}
 .lead-public-card:hover{box-shadow:var(--shadow-md);border-color:var(--color-primary-light)}
@@ -339,7 +339,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
 .lpc-source-line{margin-top:10px;font-size:12px}
 /* 底行按钮 */
 .lpc-actions{display:flex;gap:8px;margin-top:14px;padding-top:12px;border-top:1px solid var(--color-border-light);flex-wrap:wrap;align-items:center}
-@media (max-width:760px){.lpc-info-grid{grid-template-columns:1fr;gap:6px}.lead-public-card{padding:10px 14px;width:100%;min-width:unset;max-width:unset}}
+@media (max-width:760px){.lpc-info-grid{grid-template-columns:1fr;gap:6px}.lead-public-grid{flex-direction:column}.lead-public-card{padding:10px 14px;width:100%!important;min-width:unset!important;max-width:unset!important;flex-basis:100%!important}}
 
 /* ===== 客户详情 + 开发信弹窗 ===== */
 .cd-overlay{display:none;position:fixed;inset:0;background:rgba(17,24,39,0.5);z-index:9998;align-items:center;justify-content:center;padding:20px}
@@ -486,7 +486,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
         <h3>🔍 主动获客 · 搜索结果</h3>
         <div style="display:flex;align-items:center;gap:12px">
           <span class="card-sub" id="search-results-count"></span>
-          <button class="btn btn-primary btn-sm" onclick="searchNewLeads()"> 搜索新线索</button>
+          <button class="btn btn-primary btn-sm" id="search-new-btn" onclick="searchNewLeads()"> 搜索新线索</button>
         </div>
       </div>
       <div class="card-body">
@@ -3326,6 +3326,9 @@ function updateMcBadge(){
 
 /* ===== Search New Leads ===== */
 function searchNewLeads() {
+  var btn = document.getElementById('search-new-btn');
+  // 防止重复点击：按钮已禁用时直接返回
+  if(btn && btn.disabled) return;
   var token = localStorage.getItem('rhc_auth_token');
   var card = document.getElementById('search-results-card');
   var list = document.getElementById('search-results-list');
@@ -3334,6 +3337,8 @@ function searchNewLeads() {
   card.style.display = '';
   list.innerHTML = '<div class="loading-state"><div class="spin"></div><div>正在搜索全网商机线索…</div></div>';
   countEl.textContent = '';
+  // 禁用按钮，显示灰色"搜索中..."
+  if(btn){ btn.disabled=true; btn.textContent=' 搜索中…'; btn.style.opacity='0.5'; btn.style.cursor='not-allowed'; }
 
   fetch('/api/leads/search', {
     method: 'POST',
@@ -3349,14 +3354,21 @@ function searchNewLeads() {
   })
   .then(function(r) { return r.json(); })
   .then(function(data) {
+    // 恢复按钮
+    if(btn){ btn.disabled=false; btn.textContent=' 搜索新线索'; btn.style.opacity=''; btn.style.cursor=''; }
     if(!data||data.ok===false){
-      list.innerHTML='<div class="empty-state" style="padding:40px 24px"><div class="es-icon">⚠️</div><div class="es-title">搜索失败</div><div class="es-desc">'+escHtml((data&&(data.message||data.error))||'请稍后重试')+'</div></div>';
+      var msg = (data&&(data.message||data.error))||'请稍后重试';
+      if(msg.indexOf('仍在进行')>=0 || msg.indexOf('进行中')>=0){
+        list.innerHTML='<div class="empty-state" style="padding:40px 24px"><div class="es-icon">⏳</div><div class="es-title">搜索进行中</div><div class="es-desc">上一轮搜索的后台评分/补搜尚未完成，约需1-2分钟，请稍后再试。</div></div>';
+      } else {
+        list.innerHTML='<div class="empty-state" style="padding:40px 24px"><div class="es-icon">⚠️</div><div class="es-title">搜索失败</div><div class="es-desc">'+escHtml(msg)+'</div></div>';
+      }
       return;
     }
     var leads=Array.isArray(data.items)?data.items:(Array.isArray(data.leads)?data.leads:[]);
     if(!leads.length){
       var reason=escHtml(data.empty_reason||'请调整搜索条件或稍后再试');
-      list.innerHTML='<div class="empty-state" style="padding:40px 24px"><div class="es-icon">🔍</div><div class="es-title">暂未找到新线索</div><div class="es-desc">'+reason+'</div></div>';
+      list.innerHTML='<div class="empty-state" style="padding:40px 24px"><div class="es-icon"></div><div class="es-title">暂未找到新线索</div><div class="es-desc">'+reason+'</div></div>';
       countEl.textContent='';
       return;
     }
@@ -3372,9 +3384,12 @@ function searchNewLeads() {
     loadPublicPool(true);
   })
   .catch(function() {
+    // 恢复按钮
+    if(btn){ btn.disabled=false; btn.textContent=' 搜索新线索'; btn.style.opacity=''; btn.style.cursor=''; }
     list.innerHTML = '<div class="empty-state" style="padding:40px 24px"><div class="es-icon">⚠️</div><div class="es-title">搜索失败</div><div class="es-desc">请检查网络连接后重试</div></div>';
   });
 }
+
 
 /* ============================================================
    客户详情 + 开发信弹窗（v2.1）
