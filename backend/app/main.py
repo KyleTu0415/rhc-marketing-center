@@ -2753,8 +2753,11 @@ def _brave_api_search(query: str, timeout: int = 8) -> list:
     if code != 200 or not body:
         raise RuntimeError(f"Brave http{code}")
     data = json.loads(body)
-    out = []
-    for it in (data.get("web", {}) or {}).get("results", []) or []:
+    # 诊断：Brave 返回 0 结果时打印完整响应，排查 API 问题
+    web_results = (data.get("web") or {}).get("results") or []
+    if not web_results:
+        print(f"[brave-diag] query={query[:80]} code={code} response_keys={list(data.keys())} web={data.get('web')}")
+    for it in web_results:
         u = (it.get("url") or "").strip()
         t = (it.get("title") or "").strip()
         if u and t:
