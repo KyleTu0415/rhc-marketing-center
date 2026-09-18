@@ -295,8 +295,8 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
 .score-gray{background:#F0F2F3;color:#637089}
 .claim-tag{font-size:12px;font-weight:700;color:var(--color-primary);white-space:nowrap}
 /* 公海线索池：网格布局，一行4个 */
-.lead-public-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
-.lead-public-grid .lead-public-card{width:100%;margin-bottom:0}
+.lead-public-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.lead-public-grid .lead-public-card{width:100%;margin-bottom:0;min-width:0;max-width:100%;overflow:hidden}
 /* 专业B2B客户卡片 - 紧凑三行布局 */
 .lead-public-card{padding:10px 14px;border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface);transition:box-shadow var(--transition-fast),border-color var(--transition-fast)}
 .lead-public-card:hover{box-shadow:var(--shadow-md);border-color:var(--color-primary-light)}
@@ -304,9 +304,9 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
 .lead-public-card.claimed:hover{opacity:0.8;filter:grayscale(0.15)}
 /* 紧凑卡片三行布局 */
 .lpc-compact-row1{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.lpc-compact-row2{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:4px;font-size:12px;color:var(--color-text-secondary)}
+.lpc-compact-row2{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:4px;font-size:12px;color:var(--color-text-secondary);min-width:0;overflow:hidden}
 .lpc-compact-row2 .lpc-sep{color:var(--color-border)}
-.lpc-compact-row3{display:flex;align-items:center;gap:8px;margin-top:8px;padding-top:6px;border-top:1px solid var(--color-border-light)}
+.lpc-compact-row3{display:flex;align-items:center;gap:8px;margin-top:8px;padding-top:6px;border-top:1px solid var(--color-border-light);flex-wrap:wrap}
 .lpc-compact-row3 .btn{text-transform:none;font-size:12px;padding:3px 10px}
 .lpc-compact-row3 a{text-decoration:none;font-size:12px;color:var(--color-primary)}
 /* 顶行：评分+补搜状态+认领/跟进状态 */
