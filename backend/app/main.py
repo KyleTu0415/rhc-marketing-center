@@ -5331,6 +5331,13 @@ if static_dir:
     app.mount("/", StaticFiles(directory=static_dir, html=True), name="frontend")
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+async def _favicon():
+    """避免浏览器请求 /favicon.ico 时返回 404 JSON 报错。"""
+    from fastapi.responses import Response
+    return Response(status_code=204)
+
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)

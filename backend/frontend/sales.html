@@ -294,15 +294,21 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
 .score-green{background:#E6F9F1;color:#0D7B57}
 .score-gray{background:#F0F2F3;color:#637089}
 .claim-tag{font-size:12px;font-weight:700;color:var(--color-primary);white-space:nowrap}
-/* 单列堆叠布局（v2.1：客户反馈2列卡片不美观，改回单列信息丰富卡片） */
-.lead-public-grid{display:block}
-.lead-public-grid .lead-public-card{margin-bottom:14px}
-.lead-public-grid .lead-public-card:last-child{margin-bottom:0}
-/* 专业B2B客户卡片 */
-.lead-public-card{padding:16px 18px;border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface);transition:box-shadow var(--transition-fast),border-color var(--transition-fast)}
+/* 公海池窄版卡片布局 */
+.lead-public-grid{display:flex;flex-direction:column;gap:8px}
+.lead-public-grid .lead-public-card{width:33%;min-width:320px;max-width:400px;margin-bottom:0}
+/* 专业B2B客户卡片 - 紧凑三行布局 */
+.lead-public-card{padding:10px 14px;border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface);transition:box-shadow var(--transition-fast),border-color var(--transition-fast)}
 .lead-public-card:hover{box-shadow:var(--shadow-md);border-color:var(--color-primary-light)}
 .lead-public-card.claimed{opacity:0.62;filter:grayscale(0.35)}
 .lead-public-card.claimed:hover{opacity:0.8;filter:grayscale(0.15)}
+/* 紧凑卡片三行布局 */
+.lpc-compact-row1{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.lpc-compact-row2{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:4px;font-size:12px;color:var(--color-text-secondary)}
+.lpc-compact-row2 .lpc-sep{color:var(--color-border)}
+.lpc-compact-row3{display:flex;align-items:center;gap:8px;margin-top:8px;padding-top:6px;border-top:1px solid var(--color-border-light)}
+.lpc-compact-row3 .btn{text-transform:none;font-size:12px;padding:3px 10px}
+.lpc-compact-row3 a{text-decoration:none;font-size:12px;color:var(--color-primary)}
 /* 顶行：评分+补搜状态+认领/跟进状态 */
 .lpc-top-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .lpc-top-row .lpc-spacer{margin-left:auto}
@@ -333,7 +339,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
 .lpc-source-line{margin-top:10px;font-size:12px}
 /* 底行按钮 */
 .lpc-actions{display:flex;gap:8px;margin-top:14px;padding-top:12px;border-top:1px solid var(--color-border-light);flex-wrap:wrap;align-items:center}
-@media (max-width:760px){.lpc-info-grid{grid-template-columns:1fr;gap:6px}.lead-public-card{padding:14px}}
+@media (max-width:760px){.lpc-info-grid{grid-template-columns:1fr;gap:6px}.lead-public-card{padding:10px 14px;width:100%;min-width:unset;max-width:unset}}
 
 /* ===== 客户详情 + 开发信弹窗 ===== */
 .cd-overlay{display:none;position:fixed;inset:0;background:rgba(17,24,39,0.5);z-index:9998;align-items:center;justify-content:center;padding:20px}
@@ -472,11 +478,8 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
     <main class="content-area">
     <section class="page active" id="page-signals">
     <div class="page-header">
-      <div><h2>商机信号 · 公海池</h2><p>全网商机线索汇聚，按综合评分排序，优质线索优先认领；认领后进入「我的客户」私海工作台</p></div>
+      <div><h2>商机信号</h2><p>点击「搜索新线索」主动发现潜在客户；搜索结果将在下次搜索时自动进入公海池</p></div>
       <div class="page-header-actions">
-        <button class="btn-icon-refresh" onclick="loadPublicPool(true)" title="刷新列表">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-        </button>
         <button class="btn btn-primary" onclick="searchNewLeads()">🔍 搜索新线索</button>
       </div>
     </div>
@@ -3017,13 +3020,51 @@ function renderPublicPool(){
   var claimerName=getClaimerName();
   if(stats)stats.textContent='共 '+publicPoolLeads.length+' 条公海线索 · 按综合评分降序排列';
   if(!publicPoolLeads.length){
-    el.innerHTML='<div class="empty-state"><div class="es-icon">'+SIGNAL_ICON_RSS+'</div><div class="es-title">暂无可认领的商机</div><div class="es-desc">点击右上角「搜索新线索」，系统将实时全网检索南美/非洲/欧洲/东南亚的兽用器械买家。</div></div>';
+    el.innerHTML='<div class="empty-state"><div class="es-icon">'+SIGNAL_ICON_RSS+'</div><div class="es-title">暂无可认领的商机</div><div class="es-desc">点击「搜索新线索」，系统将实时全网检索南美/非洲/欧洲/东南亚的兽用器械买家。搜索结果将在下次搜索时自动进入公海池。</div></div>';
     return;
   }
   var html='<div class="lead-public-grid">';
-  html+=publicPoolLeads.map(function(ld){return renderLeadCard(ld,'public')}).join('');
+  html+=publicPoolLeads.map(function(ld){return renderCompactPoolCard(ld,claimerName)}).join('');
   html+='</div>';
   el.innerHTML=html;
+}
+function renderCompactPoolCard(ld,claimerName){
+  var n=normalizeLead(ld);
+  var isMine=n.claimer&&claimerName&&n.claimer===claimerName;
+  var cardClass='lead-public-card'+((n.isClaimed&&!isMine)?' claimed':'');
+  var ridAttr=esc(String(n.rid));
+  var h='<div class="'+cardClass+'" id="lpc-card-'+ridAttr+'">';
+  // 第一行：分数+标题
+  h+='<div class="lpc-compact-row1">';
+  h+=scoreBadgeHtml(n.score);
+  if(n.grade)h+=gradeChipHtml(n.grade);
+  h+='<span style="font-size:14px;font-weight:600;color:var(--color-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px" title="'+esc(n.company)+'">'+esc(n.company)+'</span>';
+  if(n.isClaimed){
+    if(isMine)h+='<span class="lpc-claim-tag lpc-claim-mine" style="font-size:10px">已认领</span>';
+    else h+='<span class="lpc-claim-tag lpc-claim-other" style="font-size:10px">'+esc(n.claimer||'他人')+'</span>';
+  }
+  h+='</div>';
+  // 第二行：国家、行业、渠道等
+  h+='<div class="lpc-compact-row2">';
+  var tags=[];
+  if(n.country)tags.push('🌍 '+esc(n.country));
+  if(n.industry)tags.push('🏭 '+esc(n.industry));
+  if(n.product)tags.push('📦 '+esc(n.product));
+  h+=tags.join('<span class="lpc-sep">·</span>');
+  if(!tags.length)h+='<span style="color:var(--color-text-tertiary)">暂无详细信息</span>';
+  h+='</div>';
+  // 第三行：认领、补全信息、查看来源
+  h+='<div class="lpc-compact-row3">';
+  if(!n.isClaimed){
+    h+='<button type="button" class="btn btn-primary btn-sm" onclick="claimLead(\''+ridAttr+'\',this)">认领</button>';
+  }else if(isMine){
+    h+='<button type="button" class="btn btn-outline btn-sm" onclick="openCustomerDetail(\''+ridAttr+'\',\'public\',false)">详情</button>';
+  }
+  h+=buildEnrichButtonHtml(n.rid,n.enrichStatus);
+  if(n.sourceUrl)h+='<a href="'+esc(n.sourceUrl)+'" target="_blank" rel="noopener noreferrer">查看来源 ↗</a>';
+  h+='</div>';
+  h+='</div>';
+  return h;
 }
 /* 补搜状态徽章 */
 function buildEnrichStatusHtml(status){
@@ -3317,15 +3358,14 @@ function searchNewLeads() {
       countEl.textContent='';
       return;
     }
-    countEl.textContent='本轮新增 '+leads.length+' 条线索，已加入下方公海池';
+    countEl.textContent='本轮新增 '+leads.length+' 条线索 · 下次搜索时将自动进入公海池';
     var html='';
     for(var i=0;i<leads.length;i++){
       html+=renderLeadCard(leads[i],'public');
     }
     list.innerHTML=html;
-    // 搜索完成后强制刷新公海池（新线索已入飞书表）
+    // 搜索完成后刷新公海池（上一轮线索可能已入池）
     publicPoolCache=null;
-    // 手动搜索：给20秒宽限跟进后台补搜进度（新线索状态可能稍后才翻成"补搜中"）
     enrichmentPollGraceUntil=Date.now()+20000;
     loadPublicPool(true);
   })
