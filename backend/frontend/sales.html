@@ -3040,7 +3040,7 @@ function renderCompactPoolCard(ld,claimerName){
   h+='<div class="lpc-compact-row1">';
   h+=scoreBadgeHtml(n.score);
   if(n.grade)h+=gradeChipHtml(n.grade);
-  h+='<span style="font-size:14px;font-weight:600;color:var(--color-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px" title="'+esc(n.company)+'">'+esc(n.company)+'</span>';
+  h+='<span style="font-size:14px;font-weight:600;color:var(--color-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0" title="'+esc(n.company)+'">'+esc(n.company)+'</span>';
   if(n.isClaimed){
     if(isMine)h+='<span class="lpc-claim-tag lpc-claim-mine" style="font-size:10px">已认领</span>';
     else h+='<span class="lpc-claim-tag lpc-claim-other" style="font-size:10px">'+esc(n.claimer||'他人')+'</span>';
