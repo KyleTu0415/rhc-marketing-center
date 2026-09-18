@@ -709,6 +709,7 @@ LEADS_FIELD_MAP = {
     "发件邮箱": "发件邮箱",
     "最近发信时间": "最近发信时间",
     "发信次数": "发信次数",
+    "入池时间": "入池时间",
 }
 LEAD_ACTIVE_STATUS = ("跟进中", "已转客户")
 LEAD_STATUS_OPTIONS = ("跟进中", "已转客户", "已释放")
@@ -772,6 +773,7 @@ def _ensure_leads_table():
         {"field_name": "发件邮箱", "type": 1},   # 文本（实际发件销售邮箱）
         {"field_name": "最近发信时间", "type": 1},  # 文本
         {"field_name": "发信次数", "type": 2},   # 数字
+        {"field_name": "入池时间", "type": 1},   # 文本（ISO 时间，线索进入公海池的时间戳）
     ]
     resp = _feishu_api("POST", f"/bitable/v1/apps/{FEISHU_ATK}/tables",
                        {"table": {"name": LEADS_TABLE_NAME,
@@ -823,6 +825,7 @@ LEADS_FIELDS_SCHEMA = [
     {"field_name": "发件邮箱", "type": 1},
     {"field_name": "最近发信时间", "type": 1},
     {"field_name": "发信次数", "type": 2},
+    {"field_name": "入池时间", "type": 1},
 ]
 
 
@@ -2654,6 +2657,7 @@ def _build_search_queries():
 # 主动获客抓取层诊断（最近一次搜索各引擎真实状态），供API返显到界面
 _lead_search_diag = {"engine_status": {}, "last_ok_engine": "", "ts": 0.0}
 _search_in_progress = False  # 搜索并发锁：防止两次搜索互相干扰
+_last_search_record_ids: list[str] = []  # 上一次搜索结果中的 record_id 列表，用于下次搜索时推入公海池
 
 
 def _http_fetch(url, headers, timeout=6, data=None):
@@ -3829,6 +3833,22 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
     _search_in_progress = True
 
     try:
+        # 0) 迁移上一轮搜索结果到公海池（设置入池时间）
+        global _last_search_record_ids
+        if _last_search_record_ids:
+            migrate_time = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+            tid = _ensure_leads_table()
+            for rid in _last_search_record_ids:
+                try:
+                    _feishu_api(
+                        "PUT",
+                        f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records/{rid}",
+                        {"fields": {"入池时间": migrate_time}})
+                except Exception as me:
+                    print(f"[search] 迁移线索到公海池失败 ({rid}): {me}")
+            _invalidate_leads_cache()
+            print(f"[search] 已将 {len(_last_search_record_ids)} 条上轮线索推入公海池")
+
         # 1) 执行基础搜索（同步抓取放到线程池，避免阻塞事件循环）
         raw_leads = await asyncio.to_thread(_run_lead_search, max_results)
         search_diag = getattr(raw_leads, "_search_diag", None) or {}
@@ -3886,6 +3906,7 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
                 "决策人": "",
                 "LinkedIn": "",
                 "进口记录": "",
+                "入池时间": "",
             }
             try:
                 resp = _feishu_api(
@@ -3897,6 +3918,8 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
                 leads_with_record_ids.append(lead)
             except Exception as we:
                 print(f"[search] 写入线索表失败: {we}")
+        # 记录本次搜索结果的 record_id，供下次搜索时推入公海池
+        _last_search_record_ids = [l["_record_id"] for l in leads_with_record_ids if l.get("_record_id")]
         _invalidate_leads_cache()
 
         # 4) 后台异步 Coze 评分 + 补搜（不阻塞 API 返回）
@@ -4891,12 +4914,20 @@ class ClaimByRecordRequest(BaseModel):
 
 @app.get("/api/leads/public")
 async def api_leads_public(request: Request):
-    """公海池：返回全部线索（含已认领的），按综合评分降序。需JWT认证。"""
+    """公海池：返回已进入公海池且在30天有效期内的线索，按综合评分降序。需JWT认证。"""
     token = _get_token_from_request(request)
     if not token or not _verify_token(token):
         return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
     try:
-        leads = _fetch_leads(force_refresh=True)
+        all_leads = _fetch_leads(force_refresh=True)
+        # 过滤：只返回有「入池时间」且在30天内的线索
+        now = datetime.now(timezone(timedelta(hours=8)))
+        cutoff = (now - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+        leads = []
+        for ld in all_leads:
+            pool_time = (ld.get("入池时间") or "").strip()
+            if pool_time and pool_time >= cutoff:
+                leads.append(ld)
         leads.sort(key=lambda x: float(x.get("综合评分") or 0), reverse=True)
         return {"ok": True, "items": leads, "stats": {"total": len(leads)}}
     except Exception as e:
