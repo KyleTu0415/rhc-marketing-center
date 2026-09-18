@@ -413,50 +413,50 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
 }
 
 /* ===== Search Lead Cards ===== */
+#search-results-list{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:900px){#search-results-list{grid-template-columns:1fr}}
 .search-lead-card{
   background:var(--color-surface);
   border:1px solid var(--color-border);
   border-radius:var(--radius-md);
-  margin-bottom:12px;
   overflow:hidden;
 }
-.search-lead-card:last-child{margin-bottom:0}
 .slc-header{
-  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
-  padding:10px 16px;
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  padding:8px 12px;
   background:var(--color-bg);
   border-bottom:1px solid var(--color-border-light);
-  font-size:12px;font-weight:600;
+  font-size:11px;font-weight:600;
 }
 .slc-grade{
-  display:inline-flex;align-items:center;gap:4px;
-  padding:2px 10px;border-radius:20px;font-size:11px;font-weight:700;
+  display:inline-flex;align-items:center;gap:3px;
+  padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700;
 }
 .slc-grade.grade-a{background:#E6F9F1;color:#0D7B57}
 .slc-grade.grade-b{background:#E8F0FE;color:#1A56C4}
 .slc-grade.grade-c{background:#F0F2F3;color:#637089}
 .slc-region{
-  display:inline-flex;padding:2px 8px;border-radius:4px;
-  font-size:11px;font-weight:500;
+  display:inline-flex;padding:2px 6px;border-radius:4px;
+  font-size:10px;font-weight:500;
   background:var(--color-surface);border:1px solid var(--color-border-light);
   color:var(--color-text-secondary);
 }
 .slc-date{color:var(--color-text-tertiary);font-weight:400;margin-left:auto}
-.slc-body{padding:14px 16px}
-.slc-company{font-size:14px;font-weight:700;color:var(--color-text);margin-bottom:4px}
-.slc-desc{font-size:12px;color:var(--color-text-secondary);margin-bottom:12px}
-.slc-section{margin-bottom:10px}
-.slc-section-title{font-size:12px;font-weight:600;color:var(--color-text-secondary);margin-bottom:4px;display:flex;align-items:center;gap:6px}
-.slc-section-content{font-size:12px;color:var(--color-text);line-height:1.7}
+.slc-body{padding:10px 12px}
+.slc-company{font-size:13px;font-weight:700;color:var(--color-text);margin-bottom:3px}
+.slc-desc{font-size:11px;color:var(--color-text-secondary);margin-bottom:8px}
+.slc-section{margin-bottom:6px}
+.slc-section-title{font-size:11px;font-weight:600;color:var(--color-text-secondary);margin-bottom:3px;display:flex;align-items:center;gap:5px}
+.slc-section-content{font-size:11px;color:var(--color-text);line-height:1.6}
 .slc-section-content a{color:var(--color-primary);font-weight:500}
 .slc-ai-tip{
   background:var(--color-primary-xlight);border:1px solid var(--color-primary-light);
-  border-radius:var(--radius-sm);padding:10px 14px;
-  font-size:12px;color:var(--color-text);line-height:1.7;
-  margin:10px 0;
+  border-radius:var(--radius-sm);padding:8px 10px;
+  font-size:11px;color:var(--color-text);line-height:1.6;
+  margin:8px 0;
 }
 .slc-ai-tip strong{color:var(--color-primary)}
-.slc-actions{display:flex;gap:8px;margin-top:14px;padding-top:12px;border-top:1px solid var(--color-border-light)}
+.slc-actions{display:flex;gap:6px;margin-top:10px;padding-top:8px;border-top:1px solid var(--color-border-light)}
 </style>
 </head>
 <body>
