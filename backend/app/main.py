@@ -2653,6 +2653,7 @@ def _build_search_queries():
 
 # 主动获客抓取层诊断（最近一次搜索各引擎真实状态），供API返显到界面
 _lead_search_diag = {"engine_status": {}, "last_ok_engine": "", "ts": 0.0}
+_search_in_progress = False  # 搜索并发锁：防止两次搜索互相干扰
 
 
 def _http_fetch(url, headers, timeout=6, data=None):
@@ -3820,6 +3821,13 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
                 "total": len(_search_results_cache["data"]),
                 "cached": True}
 
+    # 并发锁：防止两次搜索互相干扰（后台补搜写入的线索会被下次搜索去重掉）
+    global _search_in_progress
+    if _search_in_progress:
+        return {"ok": False, "message": "上一轮搜索仍在进行中（含后台评分+补搜），请稍后再试",
+                "total": 0, "cached": False}
+    _search_in_progress = True
+
     try:
         # 1) 执行基础搜索（同步抓取放到线程池，避免阻塞事件循环）
         raw_leads = await asyncio.to_thread(_run_lead_search, max_results)
@@ -3913,6 +3921,10 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
                     _start_enrichment_background(leads_with_record_ids)
                 except Exception as e:
                     print(f"[search-bg] 后台评分+补搜异常: {e}")
+                finally:
+                    global _search_in_progress
+                    _search_in_progress = False
+                    print("[search-bg] 后台任务全部完成，搜索锁已释放")
             threading.Thread(target=_background_score_and_enrich, daemon=True).start()
 
         # 5) 为每条新线索自动创建消息通知（后台线程，不阻塞返回）
@@ -3996,7 +4008,12 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
         }
     except Exception as e:
         print(f"[search] 主动搜索失败: {e}")
+        _search_in_progress = False
         return JSONResponse({"ok": False, "message": f"搜索失败：{e}"}, status_code=502)
+    finally:
+        # 无后台线程时立即释放锁；有后台线程时由后台线程的 finally 释放
+        if not leads_with_record_ids:
+            _search_in_progress = False
 
 
 # ============================================================
