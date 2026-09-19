@@ -6488,6 +6488,35 @@ async def api_admin_reset_lead_score(record_id: str, request: Request):
         return JSONResponse({"ok": False, "message": f"归位失败：{e}"}, status_code=502)
 
 
+@app.post("/api/admin/search-probe")
+async def api_admin_search_probe(request: Request):
+    """临时诊断（仅admin）：对给定 query 直接跑多引擎搜索，返回各引擎状态与前若干结果。"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info or user_info.get("role") != "admin":
+        return JSONResponse({"ok": False, "message": "需要管理员权限"}, status_code=403)
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    q = str(body.get("query", "")).strip()
+    if not q:
+        return JSONResponse({"ok": False, "message": "缺 query"}, status_code=400)
+    _lead_search_diag["engine_status"] = {}
+    try:
+        res = await asyncio.to_thread(_search_ddg_leads, q, 8)
+        return {
+            "ok": True, "brave_key_present": bool(os.environ.get("BRAVE_API_KEY", "").strip()),
+            "engine_status": dict(_lead_search_diag["engine_status"]),
+            "last_ok_engine": _lead_search_diag["last_ok_engine"],
+            "count": len(res),
+            "samples": [{"title": r.get("title", "")[:80], "url": r.get("url", "")} for r in res[:8]],
+        }
+    except Exception as e:
+        return JSONResponse({"ok": False, "message": str(e)}, status_code=502)
+
+
 @app.post("/api/leads/{record_id}/enrich")
 async def api_leads_enrich(record_id: str, req: Optional[EnrichLeadRequest] = None, request: Request = None):
     """手动触发单条线索补全信息。depth: light=轻补搜, deep=深度补搜。需JWT认证。"""
