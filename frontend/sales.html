@@ -373,6 +373,69 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
 .cd-gen-note{font-size:11.5px;margin-top:6px;color:var(--color-text-tertiary)}
 .cd-gen-note.ai{color:var(--color-success);font-weight:600}
 .cd-modal-footer{display:flex;gap:10px;justify-content:flex-end;padding:13px 22px;border-top:1px solid var(--color-border-light);flex-shrink:0;flex-wrap:wrap}
+/* 顶部「搜索结果」区补全后重绘：按 record_id 用公海最新数据回灌快照，
+   公海里已被系统排除的卡片保留（避免突然消失），仅更新可拿到的字段 */
+function rerenderSearchResultsFromPool(){
+  var box=document.getElementById('search-results-list');
+  if(!box||!lastSearchResultLeads.length)return;
+  var byId={};
+  for(var i=0;i<publicPoolLeads.length;i++){
+    var pl=normalizeLead(publicPoolLeads[i]);
+    if(pl.rid)byId[pl.rid]=pl;
+  }
+  var merged=lastSearchResultLeads.map(function(ld){
+    var old=normalizeLead(ld);
+    var fresh=old.rid?byId[old.rid]:null;
+    if(!fresh)return ld;
+    // 以快照为底（保留页面类型/来源等公海不返回的字段），用公海最新评分/评级/补搜状态覆盖
+    var copy=Object.assign({},ld);
+    if(!copy._record_id&&copy.record_id)copy._record_id=copy.record_id;
+    copy.score=fresh.score;
+    copy['综合评分']=fresh.score;
+    copy['评级']=fresh.grade||copy['评级']||copy.confidence;
+    copy['补搜状态']=fresh.enrichStatus||copy['补搜状态'];
+    copy['电话']=fresh.phone||copy['电话'];
+    copy['决策人']=fresh.decisionMaker||copy['决策人'];
+    copy['LinkedIn']=fresh.linkedin||copy['LinkedIn'];
+    return copy;
+  });
+  lastSearchResultLeads=merged;
+  box.innerHTML=merged.map(function(ld){return renderLeadCard(ld,'public');}).join('');
+}
+
+/* 反爬人工补全指引弹窗：引导手动访问官网 contact 页；有已知邮箱则展示并可一键复制 */
+function showAntibotGuide(opts){
+  opts=opts||{};
+  var email=(opts.known_email||opts.knownEmail||'').trim();
+  var site=(opts.website||opts.site||'官网').toString();
+  var box=document.createElement('div');
+  box.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
+  var emailRow=email?(''+
+    '<div style="margin-top:12px;background:#f5f7fa;border-radius:8px;padding:10px 12px;display:flex;align-items:center;justify-content:space-between;gap:10px">'+
+      '<div style="font-size:13px"><span style="color:#888">已知邮箱：</span><strong style="color:#c0392b">'+esc(email)+'</strong></div>'+
+      '<button type="button" id="ab-copy" style="border:none;background:#c0392b;color:#fff;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:12px">复制邮箱</button>'+
+    '</div>'):'';
+  box.innerHTML='<div style="background:#fff;border-radius:14px;max-width:440px;width:100%;padding:24px;box-shadow:0 12px 40px rgba(0,0,0,.2)">'+
+    '<div style="font-size:16px;font-weight:700;margin-bottom:6px">🔒 该官网有强反爬验证</div>'+
+    '<div style="font-size:13px;color:#666;line-height:1.8">自动补全无法读取该站（机房访问被 JS 挑战/拦截）。请手动操作：<br>'+
+    '1. 浏览器打开该公司官网的 <strong>Contact / About</strong> 页；<br>'+
+    '2. 复制邮箱/电话；<br>'+
+    '3. 在「我的线索」里粘贴到「联系邮箱」，再写开发信。</div>'+
+    emailRow+
+    '<div style="margin-top:18px;text-align:right"><button type="button" id="ab-close" style="border:1px solid #ddd;background:#fff;border-radius:8px;padding:8px 18px;cursor:pointer">我知道了</button></div>'+
+    '</div>';
+  function close(){if(box.parentNode)box.parentNode.removeChild(box);}
+  box.addEventListener('click',function(e){if(e.target===box)close();});
+  document.body.appendChild(box);
+  box.querySelector('#ab-close').onclick=close;
+  var cp=box.querySelector('#ab-copy');
+  if(cp)cp.onclick=function(){
+    function done(){cp.textContent='已复制 ✓';setTimeout(function(){cp.textContent='复制邮箱';},1500);};
+    if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(email).then(done).catch(function(){window.prompt('请手动复制邮箱：',email);});}
+    else{window.prompt('请手动复制邮箱：',email);}
+  };
+}
+
 /* 补搜状态徽章 */
 .enrich-status{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:500;white-space:nowrap}
 .enrich-status-pending{color:var(--color-text-tertiary)}
@@ -482,7 +545,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
     <main class="content-area">
     <section class="page active" id="page-signals">
     <div class="page-header">
-      <div><h2>商机信号</h2><p>点击「搜索新线索」主动发现潜在客户；搜索结果将在下次搜索时自动进入公海池</p></div>
+      <div><h2>商机信号</h2><p>点击「搜索新线索」主动发现潜在客户；新线索搜索完成后即进入公海池，刷新页面后可在下方「今日新入池」快速查看</p></div>
     </div>
     <!-- 主动获客行：始终可见 -->
     <div class="card" id="search-results-card">
@@ -504,7 +567,8 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
         <h3>公海线索池</h3>
         <span class="card-sub sig-stats" id="public-pool-stats">加载中…</span>
       </div>
-      <div class="card-body">
+      <div class="card-body" style="padding-top:0">
+        <div id="public-pool-filters" style="display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;padding:10px 0 12px;font-size:12.5px"></div>
         <div id="public-pool-list">
           <div class="loading-state"><div class="spin"></div><div>正在加载公海线索…</div></div>
         </div>
@@ -2757,6 +2821,7 @@ loadSalesNotifyBadge();
 
 /* ===== 公海池 & 我的客户（v2.0 重构） ===== */
 var publicPoolLeads=[];
+var lastSearchResultLeads=[]; // 顶部「搜索结果」本轮快照，补全后据此按 record_id 回灌重绘
 var myCustomersList=[];
 var publicPoolLoaded=false;
 var myCustomersLoaded=false;
@@ -2947,6 +3012,7 @@ function normalizeLead(ld){
   n.sentCount=leadPick(ld,['发信次数','sent_count','email_count']);
   n.lastSentAt=leadPick(ld,['最近发信时间','last_sent_at']);
   n.enrichStatus=leadPick(ld,['补搜状态','enrich_status']);
+  n.poolTime=leadPick(ld,['入池时间','pool_time','created_at']);
   n.isClaimed=(n.claimStatus==='已认领')||!!n.claimer||!!ld.claimed;
   return n;
 }
@@ -3048,18 +3114,77 @@ function renderLeadCard(ld,scope){
   return h;
 }
 
+/* 公海池筛选（纯前端）：time=all/today/week，grade=all/A/B/C */
+var poolFilter={time:'all',grade:'all'};
+function _poolDate(s){
+  if(!s)return null;
+  var m=String(s).trim().match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[ T](\d{1,2}):(\d{1,2}))?/);
+  if(!m)return null;
+  return new Date(+m[1],+m[2]-1,+m[3],+(m[4]||0),+(m[5]||0));
+}
+function _withinPoolTime(poolTime,mode){
+  if(mode==='all')return true;
+  var d=_poolDate(poolTime);
+  if(!d)return false; // 无入池时间的不进入"今日/近7天"
+  var now=new Date();
+  var startToday=new Date(now.getFullYear(),now.getMonth(),now.getDate());
+  if(mode==='today')return d>=startToday;
+  if(mode==='week'){var start7=new Date(startToday);start7.setDate(start7.getDate()-6);return d>=start7;}
+  return true;
+}
+function renderPoolFilters(){
+  var box=document.getElementById('public-pool-filters');
+  if(!box)return;
+  function seg(label,key,opts){
+    var h='<span style="color:var(--color-text-tertiary)">'+label+'</span>';
+    opts.forEach(function(o){
+      var on=poolFilter[key]===o.v;
+      h+='<button type="button" data-pf="'+key+'" data-v="'+o.v+'" style="border:1px solid '+(on?'#c0392b':'#d9d9d9')+
+        ';background:'+(on?'#fdeceb':'#fff')+';color:'+(on?'#c0392b':'#555')+
+        ';border-radius:14px;padding:3px 12px;cursor:pointer;font-size:12px">'+o.t+'</button>';
+    });
+    return h;
+  }
+  box.innerHTML=
+    seg('入池时间','time',[{v:'all',t:'全部'},{v:'today',t:'今日新入池'},{v:'week',t:'近7天'}])+
+    '<span style="width:1px;height:16px;background:#eee"></span>'+
+    seg('评级','grade',[{v:'all',t:'全部'},{v:'A',t:'A级'},{v:'B',t:'B级'},{v:'C',t:'C级'}]);
+  box.querySelectorAll('button[data-pf]').forEach(function(b){
+    b.onclick=function(){poolFilter[b.getAttribute('data-pf')]=b.getAttribute('data-v');renderPublicPool();};
+  });
+}
+function applyPoolFilters(leads){
+  return leads.filter(function(ld){
+    var n=normalizeLead(ld);
+    if(!_withinPoolTime(n.poolTime,poolFilter.time))return false;
+    if(poolFilter.grade!=='all'){
+      var g=String(n.grade||'').trim().toUpperCase().charAt(0);
+      if(g!==poolFilter.grade)return false;
+    }
+    return true;
+  });
+}
 function renderPublicPool(){
   var el=document.getElementById('public-pool-list');
   var stats=document.getElementById('public-pool-stats');
   if(!el)return;
+  renderPoolFilters();
   var claimerName=getClaimerName();
-  if(stats)stats.textContent='共 '+publicPoolLeads.length+' 条公海线索 · 按综合评分降序排列';
+  var filtered=applyPoolFilters(publicPoolLeads);
+  var filtering=(poolFilter.time!=='all'||poolFilter.grade!=='all');
+  if(stats)stats.textContent=filtering
+    ?('筛选后 '+filtered.length+' / 共 '+publicPoolLeads.length+' 条公海线索')
+    :('共 '+publicPoolLeads.length+' 条公海线索 · 按综合评分降序排列');
   if(!publicPoolLeads.length){
-    el.innerHTML='<div class="empty-state"><div class="es-icon">'+SIGNAL_ICON_RSS+'</div><div class="es-title">暂无可认领的商机</div><div class="es-desc">点击「搜索新线索」，系统将实时全网检索南美/非洲/欧洲/东南亚的兽用器械买家。搜索结果将在下次搜索时自动进入公海池。</div></div>';
+    el.innerHTML='<div class="empty-state"><div class="es-icon">'+SIGNAL_ICON_RSS+'</div><div class="es-title">暂无可认领的商机</div><div class="es-desc">点击「搜索新线索」，系统将实时全网检索南美/非洲/欧洲/东南亚的兽用器械买家。新线索搜索完成后即进入公海池，可在下方「今日新入池」中快速查看。</div></div>';
+    return;
+  }
+  if(!filtered.length){
+    el.innerHTML='<div class="empty-state" style="padding:32px 20px"><div class="es-icon">🔎</div><div class="es-title">当前筛选下没有线索</div><div class="es-desc">试试把入池时间或评级改回「全部」。</div></div>';
     return;
   }
   var html='<div class="lead-public-grid">';
-  html+=publicPoolLeads.map(function(ld){return renderCompactPoolCard(ld,claimerName)}).join('');
+  html+=filtered.map(function(ld){return renderCompactPoolCard(ld,claimerName)}).join('');
   html+='</div>';
   el.innerHTML=html;
 }
@@ -3113,6 +3238,8 @@ function buildEnrichStatusHtml(status){
     return '<span class="enrich-status enrich-status-deep">✓✓ 完整信息</span>';
   }else if(status==='已检索·未找到联系方式'){
     return '<span class="enrich-status enrich-status-failed">已检索·暂未找到联系方式</span>';
+  }else if(status==='需人工补全·官网反爬'){
+    return '<span class="enrich-status enrich-status-failed">🔒 需人工补全·官网反爬</span>';
   }else if(status==='补搜失败'){
     return '<span class="enrich-status enrich-status-failed">⚠ 补搜失败</span>';
   }
@@ -3163,11 +3290,38 @@ function enrichLead(rid,btn){
   }).then(function(res){
     if(timer)clearTimeout(timer);
     if(res.status===200&&res.data&&res.data.ok){
-      // 后端已落库：强制重拉公海拿到最新补搜状态与字段（响应体未回整条记录，不做本地合并）
+      delete _enrichLocks[rid];
+      var d=res.data;
+      // 反爬：弹人工补全指引（含已知邮箱），引导手动到官网 contact 页
+      if(d.antibot){
+        var wsite='';
+        try{
+          var hit=publicPoolLeads.filter(function(x){
+            var n2=normalizeLead(x);return n2.rid===rid;})[0];
+          if(hit)wsite=hit['官网']||hit.website||'';
+        }catch(e){}
+        showToast('官网有强反爬，需人工补全','warn');
+        showAntibotGuide({known_email:d.known_email||'',website:wsite});
+      }else{
+        showToast(d.found_any===false?'已检索，暂未找到决策人/LinkedIn/电话':'信息补全完成',
+                  d.found_any===false?'warn':'success');
+      }
+      // 强制重拉公海，拉完同步重绘顶部「搜索结果」区，修按钮卡在"补全中"
       publicPoolCache=null;
-      loadPublicPool(true);
-      showToast(res.data.found_any===false?'已检索，暂未找到决策人/LinkedIn/进口记录':'信息补全完成',
-                res.data.found_any===false?'warn':'success');
+      fetch('/api/leads/public',{headers:authHeaders(),cache:'no-store'})
+        .then(function(r){return r.json();})
+        .then(function(pd){
+          if(pd&&pd.ok!==false&&Array.isArray(pd.items)){
+            publicPoolLeads=pd.items;
+            publicPoolCache={items:pd.items.slice(),timestamp:Date.now()};
+            renderPublicPool();
+            rerenderSearchResultsFromPool();
+            startEnrichmentPolling();
+          }else{
+            loadPublicPool(true);
+          }
+        })
+        .catch(function(){loadPublicPool(true);});
     }else{
       resetBtn();
       showToast((res.data&&(res.data.message||res.data.detail))||'补全失败，请稍后重试','error');
@@ -3175,6 +3329,7 @@ function enrichLead(rid,btn){
   }).catch(function(err){
     if(timer)clearTimeout(timer);
     resetBtn();
+    rerenderSearchResultsFromPool(); // 超时也复位顶部「搜索结果」卡，避免残留"补全中"
     if(err&&err.name==='AbortError'){
       showToast('补全超时（免费搜索引擎当前可能被限流），请稍后再试或明天接入 Brave 后重试','error');
     }else{
@@ -3223,6 +3378,7 @@ function startEnrichmentPolling(){
         })();
         publicPoolCache={items:publicPoolLeads.slice(),timestamp:Date.now()};
         renderPublicPool();
+        rerenderSearchResultsFromPool(); // 顶部「搜索结果」与公海同步，补全状态不残留
         // 有补搜在跑则继续；没有时，仅在手动搜索宽限窗口内继续观察，窗口结束即停
         if(!anyRunning() && Date.now()>enrichmentPollGraceUntil){
           clearInterval(publicPoolPollTimer);
@@ -3391,7 +3547,7 @@ function searchNewLeads() {
       countEl.textContent='';
       return;
     }
-    countEl.textContent='本轮新增 '+leads.length+' 条线索 · 下次搜索时将自动进入公海池';
+    countEl.textContent='本轮新增 '+leads.length+' 条线索 · 已同时进入公海池（可用下方「今日新入池」筛选查看）';
     var st=data.stats||{};
     var dropParts=[];
     if(st.gov_dropped) dropParts.push('政府/教育页 '+st.gov_dropped);
@@ -3408,6 +3564,7 @@ function searchNewLeads() {
         +'（共 '+(st.queries||0)+' 个关键词）</div>';
     }
     var html=auditHtml;
+    lastSearchResultLeads=leads.slice(); // 存快照，供补全成功后按 record_id 重绘
     for(var i=0;i<leads.length;i++){ html+=renderLeadCard(leads[i],'public'); }
     list.innerHTML=html;
     publicPoolCache=null;

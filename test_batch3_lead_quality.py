@@ -64,6 +64,21 @@ def main():
     for t, u in block:
         chk(f"挡[{t[:28]}]", ns["_is_secondhand_result"](u, t) or ns["_is_junk_result_url"](u), True)
 
+    print("== 第四批：平台类按域名主体匹配（IT 重点：国别后缀全挡）==")
+    for d in ["europages.co.uk", "europages.de", "europages.fr",
+              "www.europages.co.uk", "m.europages.es",
+              "kompass.co.uk", "thomasnet.de", "alibaba.cn",
+              "www.machineseeker.co.uk", "amazon.co.uk", "yellowpages.com.au",
+              "hotfrog.in"]:
+        chk(f"平台挡[{d}]", ns["_is_junk_result_url"]("https://" + d + "/x"), True)
+    print("== 第四批：平台主体匹配不得误伤同名企业官网 ==")
+    for d in ["europages-vet-clinic.com", "mykompass-software.com", "amazonforestsupplies.com",
+              "cylex-veterinary.com", "valevetequipment.co.uk", "burtonsveterinary.com"]:
+        chk(f"企业留[{d}]", ns["_is_junk_result_url"]("https://" + d + "/"), False)
+    print("== 第四批：竞品仍按精确串（不升级主体匹配）==")
+    for d in ["mindrayanimal.com", "zoetis.com", "kruuse.com"]:
+        chk(f"竞品挡[{d}]", ns["_is_junk_result_url"]("https://www." + d + "/p"), True)
+
     print("== 变更1：该留 ==")
     keep = [
         ("Vale Veterinary Equipment Supplies", "https://www.valevetequipment.co.uk/"),
@@ -123,6 +138,21 @@ def main():
     r = ns["_fetch_official_site_contacts"]("https://www.valevetequipment.co.uk/")
     chk("Vale登记为antibot", r.get("antibot"), True)
     chk("Vale不返回垃圾字段", any([r["email"], r["phone"], r["linkedin"], r["decision_maker"]]), False)
+    chk("Vale带出已知邮箱", r.get("known_email"), "sales@valevetequipment.co.uk")
+    rb2 = ns["_fetch_official_site_contacts"]("https://burtonsveterinary.com/")
+    chk("Burtons为antibot", rb2.get("antibot"), True)
+    chk("Burtons无已知邮箱", rb2.get("known_email"), "")
+
+    print("== 第四批：存量评级回填口径（模拟 backfill_lead_grades 核心判定）==")
+    def backfill_expected(score, cur):
+        want = ns["_grade_from_score"](int(float(score)))
+        return (want, (cur.strip().upper() == want))
+    # 历史撕裂样本：必须被改写到与分数一致
+    for score, cur, want in [("45", "A", "C"), ("10", "A", "C"), ("8", "A", "C"),
+                             ("85", "C", "A"), ("62", "A", "B"), ("90", "A", "A"),
+                             ("55", "B", "C")]:
+        w, unchanged = backfill_expected(score, cur)
+        chk(f"回填 {score}分 旧{cur} -> {w}", (w, unchanged), (want, cur == want))
     # B2B/政府站安全闸门：拒绝抓取
     for bad in ["https://www.machineseeker.co.uk/", "https://bizzmed.co.za/", "https://www.trade.gov/x"]:
         rb = ns["_fetch_official_site_contacts"](bad)

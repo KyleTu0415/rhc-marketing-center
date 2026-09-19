@@ -698,6 +698,7 @@ LEADS_FIELD_MAP = {
     "邮箱来源": "邮箱来源",
     "认领状态": "认领状态",
     "综合评分": "综合评分",
+    "评级": "评级",
     "官网": "官网",
     "行业": "行业",
     "邮箱格式": "邮箱格式",
@@ -760,6 +761,7 @@ def _ensure_leads_table():
         {"field_name": "认领状态", "type": 3,    # 单选：未认领/已认领
          "property": {"options": [{"name": "未认领"}, {"name": "已认领"}]}},
         {"field_name": "综合评分", "type": 2},   # 数字（0-100）
+        {"field_name": "评级", "type": 1},       # 文本：A/B/C，严格按 _grade_from_score(综合评分) 同源回写
         {"field_name": "官网", "type": 1},       # 文本
         {"field_name": "行业", "type": 1},       # 文本
         {"field_name": "邮箱格式", "type": 1},   # 文本
@@ -771,7 +773,8 @@ def _ensure_leads_table():
          "property": {"options": [
              {"name": "未补搜"}, {"name": "轻补搜中"},
              {"name": "已轻补"}, {"name": "深度补搜中"},
-             {"name": "已深度补全"}, {"name": "补搜失败"}
+             {"name": "已深度补全"}, {"name": "补搜失败"},
+             {"name": "已检索·未找到联系方式"}, {"name": "需人工补全·官网反爬"}
          ]}},
         {"field_name": "跟进状态", "type": 3,    # 单选（开发信跟进）
          "property": {"options": [{"name": n} for n in LEAD_FOLLOW_STATUS_OPTIONS]}},
@@ -813,6 +816,7 @@ LEADS_FIELDS_SCHEMA = [
     {"field_name": "认领状态", "type": 3,
      "property": {"options": [{"name": "未认领"}, {"name": "已认领"}]}},
     {"field_name": "综合评分", "type": 2},
+    {"field_name": "评级", "type": 1},
     {"field_name": "官网", "type": 1},
     {"field_name": "行业", "type": 1},
     {"field_name": "邮箱格式", "type": 1},
@@ -824,7 +828,8 @@ LEADS_FIELDS_SCHEMA = [
      "property": {"options": [
          {"name": "未补搜"}, {"name": "轻补搜中"},
          {"name": "已轻补"}, {"name": "深度补搜中"},
-         {"name": "已深度补全"}, {"name": "补搜失败"}
+         {"name": "已深度补全"}, {"name": "补搜失败"},
+         {"name": "已检索·未找到联系方式"}, {"name": "需人工补全·官网反爬"}
      ]}},
     {"field_name": "跟进状态", "type": 3,
      "property": {"options": [{"name": n} for n in LEAD_FOLLOW_STATUS_OPTIONS]}},
@@ -931,7 +936,7 @@ async def _migrate_legacy_scores():
             continue  # 已是低分，无需修正
         try:
             new_score, page_type, buyer_type = await call_coze_scoring_workflow(ld)
-            upd = {"综合评分": new_score}
+            upd = {"综合评分": new_score, "评级": _grade_from_score(new_score)}
             if page_type:
                 upd["页面类型"] = page_type
             if buyer_type:
@@ -2906,6 +2911,25 @@ _JUNK_HOST_MARKS = (
 )
 
 
+def _strip_www(host: str) -> str:
+    return host[4:] if host.startswith("www.") else host
+
+
+def _platform_mark_hit(host: str, mark: str) -> bool:
+    """平台类黑名单按"域名主体"匹配（IT 要求），一次覆盖所有国别后缀：
+    取 mark 的第一个标签作为平台主体（europages.com / europages. 都是 europages；
+    alibaba.com 是 alibaba；machineseeker. 是 machineseeker），
+    只要 host 中存在"完全相等"的域名标签即命中（host 各标签逐段比较）。
+    逐段相等可挡 europages.co.uk/.de/.fr、www.europages.com，同时不误伤
+    europages-vet-clinic.com（标签是 europages-vet-clinic，不等于 europages）。
+    注意：竞品名单不走这里，仍用精确子串，避免误挡同主域名的企业官网。"""
+    h = _strip_www(host)
+    key = mark.split(".", 1)[0].strip()
+    if not key:  # 形如 ".com" 等异常 mark，忽略
+        return False
+    return key in h.split(".")
+
+
 def _is_junk_result_url(url: str) -> bool:
     try:
         from urllib.parse import urlparse
@@ -2914,7 +2938,11 @@ def _is_junk_result_url(url: str) -> bool:
         return True
     if not host:
         return True
-    if any(mark in host for mark in (_JUNK_HOST_MARKS + _COMPETITOR_HOST_MARKS)):
+    # 竞品域名：保持精确子串（防止误挡同主域名的企业官网）
+    if any(mark in host for mark in _COMPETITOR_HOST_MARKS):
+        return True
+    # 平台/目录/二手等：按域名主体匹配，覆盖全部国别后缀
+    if any(_platform_mark_hit(host, m) for m in _JUNK_HOST_MARKS):
         return True
     # 域名本身即目录/黄页站（如 vetsuppliersdirectory.com.au、xxx-directory.net），非单一公司主体
     if "directory" in host:
@@ -3890,6 +3918,44 @@ def _update_leads_record(record_id: str, fields: dict):
         print(f"[enrich] 更新线索记录失败 ({record_id}): {e}")
 
 
+def backfill_lead_grades(apply: bool = False) -> dict:
+    """一次性：把全部历史线索的「评级」按 _grade_from_score(综合评分) 重刷，
+    修复存量"45分 A级 / 10分 A级"撕裂数据。
+    apply=False 仅干跑返回差异清单不写库；apply=True 才逐条 PUT。
+    只更新「评级」字段，不动评分/系统排除等其他列。"""
+    leads = _fetch_leads(force_refresh=True)
+    changes, skipped, errors = [], 0, 0
+    for ld in leads:
+        rid = ld.get("record_id") or ld.get("_record_id") or ""
+        if not rid:
+            continue
+        raw_score = ld.get("综合评分")
+        try:
+            score = int(float(raw_score))
+        except (TypeError, ValueError):
+            score = None
+        cur = (ld.get("评级") or "").strip().upper()
+        if score is None:
+            skipped += 1
+            continue
+        want = _grade_from_score(score)
+        if cur == want:
+            skipped += 1
+            continue
+        changes.append({"record_id": rid,
+                        "company": (ld.get("公司/机构") or "")[:40],
+                        "score": score, "old_grade": cur or "(空)", "new_grade": want})
+        if apply:
+            try:
+                _update_leads_record(rid, {"评级": want})
+            except Exception as e:
+                errors += 1
+                print(f"[backfill] 评级回填失败 {rid}: {e}")
+    return {"total": len(leads), "to_change": len(changes),
+            "unchanged": skipped, "errors": errors,
+            "applied": bool(apply), "changes": changes}
+
+
 def _search_ddg_single(query: str, timeout: int = 6) -> list:
     """单条DuckDuckGo搜索，返回 [{title, url, snippet}]（复用现有模式）"""
     import urllib.parse as _up
@@ -3935,10 +4001,11 @@ _CONTACT_PATH_CANDIDATES = (
 )
 # 已知强反爬/JS 挑战域名：生产机房 IP 的轻量请求过不了（sgcaptcha / Cloudflare / 403），
 # 自动补全拿不到联系方式，直接标记转人工。后续实测发现新的同类站点追加到这里。
-_KNOWN_ANTIBOT_DOMAINS = (
-    "valevetequipment.co.uk",   # sgcaptcha JS 挑战
-    "burtonsveterinary.com",    # 机房 IP 直接 403
-)
+_KNOWN_ANTIBOT_DOMAINS = {
+    # 域名: (反爬说明, 已知联系邮箱[人工核实后登记，供前端弹窗指引；未知留空])
+    "valevetequipment.co.uk": ("sgcaptcha JS 挑战", "sales@valevetequipment.co.uk"),
+    "burtonsveterinary.com": ("机房 IP 直接 403", ""),
+}
 # 事务/平台类邮箱，不是销售联系人，抓到也丢弃
 _CONTACT_EMAIL_BLOCK = (
     "sentry.io", "wixpress.com", "wordpress.com", "example.com",
@@ -4040,7 +4107,8 @@ def _fetch_official_site_contacts(website: str, company: str = "") -> dict:
     仅抓公司自家官网（过 _real_website 且非聚合/平台/社媒/政府），最多首页+联系/关于约 4 页，
     单页 8 秒、整步约 30 秒上限；任何失败静默返回已拿到的部分，绝不抛错。
     antibot=True 表示官网存在强反爬/JS 挑战（已知域名或实抓到挑战页），自动补全拿不到，转人工。"""
-    result = {"email": "", "phone": "", "linkedin": "", "decision_maker": "", "antibot": False}
+    result = {"email": "", "phone": "", "linkedin": "", "decision_maker": "",
+              "antibot": False, "known_email": ""}
     root = _site_root(website or "")
     if not root:
         return result
@@ -4048,9 +4116,11 @@ def _fetch_official_site_contacts(website: str, company: str = "") -> dict:
     try:
         from urllib.parse import urlparse as _up
         _host = _up(root).netloc.lower()
-        if any(_host == d or _host.endswith("." + d) for d in _KNOWN_ANTIBOT_DOMAINS):
-            result["antibot"] = True
-            return result
+        for _d, (_note, _known_email) in _KNOWN_ANTIBOT_DOMAINS.items():
+            if _host == _d or _host.endswith("." + _d):
+                result["antibot"] = True
+                result["known_email"] = _known_email or ""
+                return result
     except Exception:
         pass
     # 安全闸门：必须是真实企业站，且不是目录/平台/政府/社媒等非公司主体
@@ -4119,7 +4189,8 @@ async def light_enrich_lead(company_name: str, country: str, website_hint: str =
     优先直取已确认官网的联系页（登录官网抓 /contact /about），搜索引擎摘要仅作兜底。
     单条总耗时控制在可接受范围，抓取失败静默退回搜索逻辑。"""
     result = {"website": "", "industry": "", "email_pattern": "",
-              "phone": "", "decision_maker": "", "linkedin": "", "antibot": False}
+              "phone": "", "decision_maker": "", "linkedin": "",
+              "antibot": False, "known_email": ""}
     try:
         # ---- 第一步：若已确认真实官网，直接登录联系页取联系方式（成功率远高于摘要正则） ----
         official_site = ""
@@ -4140,6 +4211,7 @@ async def light_enrich_lead(company_name: str, country: str, website_hint: str =
                 result["linkedin"] = site_contacts["linkedin"]
             if site_contacts.get("antibot"):
                 result["antibot"] = True
+                result["known_email"] = site_contacts.get("known_email", "") or result["known_email"]
 
         # ---- 第二步：搜索引擎找官网 + 摘要兜底（官网未直取到联系方式时补充） ----
         queries = [
@@ -4171,6 +4243,7 @@ async def light_enrich_lead(company_name: str, country: str, website_hint: str =
                                     result["linkedin"] = result["linkedin"] or sc.get("linkedin", "")
                                     if sc.get("antibot"):
                                         result["antibot"] = True
+                                        result["known_email"] = sc.get("known_email", "") or result["known_email"]
                         break
                 all_text += " " + item.get("title", "") + " " + item.get("snippet", "")
             await asyncio.sleep(_ENRICH_DELAY)
@@ -4209,7 +4282,8 @@ async def light_enrich_lead(company_name: str, country: str, website_hint: str =
 async def deep_enrich_lead(company_name: str, country: str, website: str = "") -> dict:
     """深度补搜：决策人、LinkedIn、进口记录、电话
     组合多维度搜索，提取关键商务信息；有官网时先登录联系页直取。"""
-    result = {"decision_maker": "", "linkedin": "", "import_record": "", "phone": "", "antibot": False}
+    result = {"decision_maker": "", "linkedin": "", "import_record": "", "phone": "",
+              "antibot": False, "known_email": ""}
     # 官网直取优先：电话/联系人/LinkedIn 从 contact/about 页拿，搜索摘要再补充
     if website:
         try:
@@ -4219,6 +4293,7 @@ async def deep_enrich_lead(company_name: str, country: str, website: str = "") -
             result["linkedin"] = site.get("linkedin", "")
             result["phone"] = site.get("phone", "")
             result["antibot"] = bool(site.get("antibot"))
+            result["known_email"] = site.get("known_email", "") or ""
         except Exception:
             pass
     loop = asyncio.get_event_loop()
@@ -4343,7 +4418,7 @@ async def _enrich_all_leads_async(new_leads: list):
         try:
             new_score, page_type, buyer_type = await call_coze_scoring_workflow(lead)
             lead["score"] = new_score
-            upd = {"综合评分": new_score}
+            upd = {"综合评分": new_score, "评级": _grade_from_score(new_score)}
             if page_type:
                 upd["页面类型"] = page_type
                 lead["page_type"] = page_type
@@ -4870,6 +4945,7 @@ def _run_lead_search_job(max_results: int = 30):
                 "跟进备注": "",
                 "邮箱来源": "",
                 "综合评分": score,
+                "评级": _grade_from_score(score),
                 "补搜状态": "未补搜",
                 "官网": "",
                 "行业": "",
@@ -4927,6 +5003,8 @@ def _run_lead_search_job(max_results: int = 30):
                             if lead.get("_record_id"):
                                 upd_fields = {"页面类型": page_type or "unknown",
                                               "买家类型": buyer_type or "unknown"}
+                                # 评级始终按当前分数同源回写飞书「评级」列（修复撕裂数据的关键一环）
+                                upd_fields["评级"] = _grade_from_score(lead.get("score", 0))
                                 if not lead.get("_score_penalty"):
                                     upd_fields["综合评分"] = lead.get("score", 0)
                                 # 分数变化后评级与跟进话术同步对齐（修复"低分却给 A 级建议"）
@@ -6145,6 +6223,30 @@ class EnrichLeadRequest(BaseModel):
     depth: str = "light"  # "light" 或 "deep"
 
 
+@app.post("/api/admin/leads/backfill-grades")
+async def api_admin_backfill_grades(request: Request):
+    """一次性运维：按综合评分回填历史线索「评级」。仅 admin。
+    body {"apply": false} 默认干跑返回差异；{"apply": true} 才写库。"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info or user_info.get("role") != "admin":
+        return JSONResponse({"ok": False, "message": "需要管理员权限"}, status_code=403)
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    apply = bool(body.get("apply", False))
+    try:
+        result = await asyncio.to_thread(backfill_lead_grades, apply)
+        if apply:
+            _invalidate_leads_cache()
+        return {"ok": True, **result}
+    except Exception as e:
+        print(f"[backfill] 评级回填失败: {e}")
+        return JSONResponse({"ok": False, "message": f"回填失败：{e}"}, status_code=502)
+
+
 @app.post("/api/leads/{record_id}/enrich")
 async def api_leads_enrich(record_id: str, req: Optional[EnrichLeadRequest] = None, request: Request = None):
     """手动触发单条线索补全信息。depth: light=轻补搜, deep=深度补搜。需JWT认证。"""
@@ -6191,6 +6293,7 @@ async def api_leads_enrich(record_id: str, req: Optional[EnrichLeadRequest] = No
             lead_info = {**{k: _tv(v) for k, v in fields.items()}, **enriched}
             new_score, page_type, buyer_type = await call_coze_scoring_workflow(lead_info)
             update_fields["综合评分"] = new_score
+            update_fields["评级"] = _grade_from_score(new_score)
             if page_type:
                 update_fields["页面类型"] = page_type
             if buyer_type:
@@ -6200,7 +6303,9 @@ async def api_leads_enrich(record_id: str, req: Optional[EnrichLeadRequest] = No
                 update_fields["系统排除"] = _ex
             _update_leads_record(record_id, update_fields)
             _invalidate_leads_cache()
-            return {"ok": True, "message": "轻补搜完成", "data": enriched, "new_score": new_score}
+            return {"ok": True, "message": "轻补搜完成", "data": enriched, "new_score": new_score,
+                    "antibot": bool(enriched.get("antibot")),
+                    "known_email": enriched.get("known_email", "") or ""}
         else:
             _update_leads_record(record_id, {"补搜状态": "深度补搜中"})
             deep = await deep_enrich_lead(company_name, country, website)
@@ -6228,7 +6333,8 @@ async def api_leads_enrich(record_id: str, req: Optional[EnrichLeadRequest] = No
             _update_leads_record(record_id, update_fields)
             _invalidate_leads_cache()
             return {"ok": True, "message": ret_msg, "data": deep, "found_any": found_any,
-                    "antibot": bool(deep.get("antibot"))}
+                    "antibot": bool(deep.get("antibot")),
+                    "known_email": deep.get("known_email", "") or ""}
     except Exception as e:
         print(f"[enrich] 手动补搜失败 ({record_id}): {e}")
         _update_leads_record(record_id, {"补搜状态": "补搜失败"})
@@ -6284,6 +6390,7 @@ async def _scheduled_leads_search():
                 "跟进备注": "",
                 "邮箱来源": "",
                 "综合评分": score,
+                "评级": _grade_from_score(score),
                 "补搜状态": "未补搜",
                 "官网": "",
                 "行业": "",
