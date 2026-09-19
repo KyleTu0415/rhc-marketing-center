@@ -2637,7 +2637,10 @@ _SEARCH_COUNTRIES = {
     "Ghana": "非洲", "Tanzania": "非洲",
     # 欧洲
     "Germany": "欧洲", "France": "欧洲", "UK": "欧洲", "Spain": "欧洲",
-    "Italy": "欧洲", "Poland": "欧洲", "Netherlands": "欧洲",
+    "Italy": "欧洲", "Netherlands": "欧洲",
+    # 东欧（2026-09 分布校准轮换补充）
+    "Poland": "东欧", "Romania": "东欧", "Czech Republic": "东欧",
+    "Hungary": "东欧", "Ukraine": "东欧",
     # 东南亚
     "Thailand": "东南亚", "Vietnam": "东南亚", "Philippines": "东南亚",
     "Indonesia": "东南亚", "Malaysia": "东南亚", "Myanmar": "东南亚",
@@ -2658,10 +2661,15 @@ _search_results_cache = {"data": None, "ts": 0.0}
 _SEARCH_CACHE_TTL = 30  # 搜索结果30秒缓存
 
 
-def _build_search_queries():
+def _build_search_queries(custom_queries: Optional[list] = None):
     """构建搜索词列表：通用搜索用高意图关键词（importer/distributor/hospital + 目标市场）
-    每次调用时随机打乱顺序，保证多轮搜索能发现不同线索。"""
+    每次调用时随机打乱顺序，保证多轮搜索能发现不同线索。
+    custom_queries 非空时直接用管理员给的原始词（轮换国家/产品线/意图），只统一追加负词。"""
     import random
+    # 统一追加：头部竞品 -site: 排除 + 二手/翻新精确短语排除
+    _neg_suffix = f"{_COMPETITOR_SITE_SUFFIX} {_SECONDHAND_SUFFIX}"
+    if custom_queries:
+        return [f"{q} {_neg_suffix}" for q in custom_queries if str(q).strip()]
     queries = []
 
     # ===== 高意图通用搜索 =====
@@ -4639,11 +4647,14 @@ def _build_deep_search_queries():
     return extra
 
 
-def _run_lead_search(max_results: int = 30) -> list:
+def _run_lead_search(max_results: int = 30, custom_queries: Optional[list] = None) -> list:
     """执行主动搜索核心逻辑，返回结构化线索列表。
+    custom_queries：管理员显式指定的原始搜索词（用于轮换国家/产品线/意图词做分布校准），
+    非空时完全替代默认 query 池（仍统一追加竞品/二手负词）。
     诊断计数挂在返回列表对象的 _search_diag 属性上（列表可挂自定义属性）。"""
-    queries = _build_search_queries()
+    queries = _build_search_queries(custom_queries=custom_queries)
     all_raw = []  # [{title, url, snippet}]
+    used_queries = list(queries[:min(len(queries), 25 if bool(os.environ.get("BRAVE_API_KEY", "").strip()) else 15)])
     seen_urls = set()
     empty_rounds = 0  # 连续空结果轮次，用于判断是否被搜索引擎限流
     # 控制搜索轮次与节奏：Brave 免费档 1 QPS，轮次太多既慢又耗额度；
@@ -4685,10 +4696,12 @@ def _run_lead_search(max_results: int = 30) -> list:
     # ===== 深度搜索兜底：首轮结果太少时，用更广泛的关键词补充 =====
     if len(all_raw) < 5:
         print(f"[search] 首轮结果不足({len(all_raw)}条)，启动深度搜索补充...")
+        deep_search_triggered = True
         deep_queries = _build_deep_search_queries()
         max_deep = min(len(deep_queries), 10 if use_brave else 8)
         for j, dq in enumerate(deep_queries[:max_deep]):
             results = _search_ddg_leads(dq, timeout=8 if use_brave else 6)
+            used_queries.append(dq)
             for r in results:
                 url = r.get("url", "").lower().strip()
                 if url and url not in seen_urls:
@@ -4703,6 +4716,8 @@ def _run_lead_search(max_results: int = 30) -> list:
             print(f"[search] 深度搜索补充后原始结果{len(all_raw)}条")
 
     # ===== 优化1：内部去重（按公司名，保留第一条） =====
+    # 先固化"真·原始结果数"：此前 all_raw 在下面被去重结果覆盖，导致 diag.raw_results 失真
+    raw_count_total = len(all_raw)
     _internal_seen_companies = set()
     _internal_dedup_drop = 0
     _deduped_raw = []
@@ -4725,7 +4740,7 @@ def _run_lead_search(max_results: int = 30) -> list:
         _internal_seen_companies.add(_company_key)
         _deduped_raw.append(r)
     if _internal_dedup_drop > 0:
-        print(f"[search] 内部去重: 原始{len(all_raw)}条 → 去重后{len(_deduped_raw)}条（丢弃{_internal_dedup_drop}条重复公司名）")
+        print(f"[search] 内部去重: 原始{raw_count_total}条 → 去重后{len(_deduped_raw)}条（丢弃{_internal_dedup_drop}条重复公司名）")
     all_raw = _deduped_raw
 
     # 提取公司信息
@@ -4838,8 +4853,10 @@ def _run_lead_search(max_results: int = 30) -> list:
           + ("（疑似被搜索引擎限流）" if empty_rounds >= 3 and not all_raw else ""))
     try:
         leads._search_diag = {
-            "queries": min(len(queries), max_queries),
-            "query_list": queries[:max_queries],
+            "queries": len(used_queries),
+            "query_list": used_queries,
+            "raw_count": raw_count_total,
+            "internal_dedup_dropped": _internal_dedup_drop,
             "raw_results": len(all_raw),
             "dirty_dropped": dirty_dropped,
             "seller_dropped": seller_dropped,
@@ -4849,6 +4866,7 @@ def _run_lead_search(max_results: int = 30) -> list:
             "manufacturer_dropped": manufacturer_dropped,
             "non_company_dropped": non_company_dropped,
             "valid_leads": len(leads),
+            "deep_search_triggered": deep_search_triggered,
             "empty_rounds": empty_rounds,
             "engine_status": dict(_lead_search_diag["engine_status"]),
             "last_ok_engine": _lead_search_diag["last_ok_engine"],
@@ -4861,6 +4879,8 @@ def _run_lead_search(max_results: int = 30) -> list:
 class LeadSearchRequest(BaseModel):
     max_results: Optional[int] = 30
     force_refresh: Optional[bool] = False
+    # 仅管理员：显式指定本轮搜索词（轮换国家/产品线/意图词做分布校准），非空时替代默认词池
+    queries: Optional[list] = None
 
 
 @app.get("/api/leads/search/status")
@@ -4899,13 +4919,23 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
 
     max_results = 30
     force_refresh = False
+    custom_queries = None
     if req:
         max_results = min(req.max_results or 30, 50)
         force_refresh = req.force_refresh or False
+        if req.queries:
+            # 自定义 query 仅管理员可用（用于分布校准），普通销售忽略此项
+            if user_info.get("role") != "admin":
+                return JSONResponse(
+                    {"ok": False, "message": "自定义搜索词仅管理员可用"}, status_code=403)
+            cq = [str(q).strip() for q in req.queries if str(q).strip()]
+            if cq:
+                custom_queries = cq[:25]  # 上限 25，与默认轮次一致
 
-    # 30 秒内已有结果且未强制刷新：直接命中缓存，无需启动后台任务
+    # 30 秒内已有结果且未强制刷新：直接命中缓存，无需启动后台任务（自定义 query 不走缓存）
     now = time.time()
-    if not force_refresh and _search_results_cache["data"] is not None \
+    if not force_refresh and custom_queries is None \
+            and _search_results_cache["data"] is not None \
             and now - _search_results_cache["ts"] < _SEARCH_CACHE_TTL:
         return {"ok": True, "status": "finished", "items": _search_results_cache["data"],
                 "total": len(_search_results_cache["data"]), "cached": True}
@@ -4921,12 +4951,14 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
         "phase": "正在全网搜索买家线索…", "done_queries": 0, "total_queries": 0,
         "result": None, "error": "", "ts": time.time(),
     })
-    threading.Thread(target=_run_lead_search_job, args=(max_results,), daemon=True).start()
+    threading.Thread(target=_run_lead_search_job,
+                     args=(max_results,), kwargs={"custom_queries": custom_queries},
+                     daemon=True).start()
     return {"ok": True, "status": "started",
             "message": "搜索已开始，请稍候查看结果"}
 
 
-def _run_lead_search_job(max_results: int = 30):
+def _run_lead_search_job(max_results: int = 30, custom_queries: Optional[list] = None):
     """后台执行完整搜索管线（迁移公海→全网搜索→去重→写入飞书→启动评分/补搜）。
     全程把进度/结果写入 _lead_search_job，供状态接口轮询；不向调用方抛异常。"""
     global _search_in_progress, _last_search_record_ids
@@ -4952,7 +4984,7 @@ def _run_lead_search_job(max_results: int = 30):
         # 1) 执行基础搜索（本函数已在后台线程中，直接同步调用）
         _lead_search_job["searching"] = True
         _lead_search_job["phase"] = "正在全网搜索买家线索…"
-        raw_leads = _run_lead_search(max_results)
+        raw_leads = _run_lead_search(max_results, custom_queries=custom_queries)
         search_diag = getattr(raw_leads, "_search_diag", None) or {}
         _lead_search_job["searching"] = False
         _lead_search_job["phase"] = "正在去重、评分并写入线索表…"
@@ -4968,6 +5000,7 @@ def _run_lead_search_job(max_results: int = 30):
         tid = _ensure_leads_table()
         now_iso = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
         leads_with_record_ids = []
+        _company_count = 0  # 规则初判为 company 主体的新线索数（供 stats 体检）
         for lead in new_leads:
             # 先用规则兜底分（Coze 评分改到后台异步跑，避免阻塞 API 超时）
             _pt_init = _rule_guess_page_type(
@@ -4977,6 +5010,8 @@ def _run_lead_search_job(max_results: int = 30):
             # 域名强制分类：竞品/平台黄页 host 不依赖 Coze 即落正确类型与固定分
             _pt_init, _bt_init = _apply_host_page_override(
                 _pt_init, _bt_init, lead.get("website", ""))
+            if _pt_init == "company":
+                _company_count += 1
             if lead.get("_score_penalty"):
                 score = lead.get("score", 5)
                 print(f"[search] 假线索/长标题跳过评分: {lead.get('company_name','')[:30]} → {score}分")
@@ -5183,11 +5218,21 @@ def _run_lead_search_job(max_results: int = 30):
             "enrichment": "started" if leads_with_record_ids else "none",
             "stats": {
                 "total_found": len(raw_leads),
+                "raw_count": search_diag.get("raw_count", search_diag.get("raw_results", 0)),
+                "post_internal_dedup": search_diag.get("raw_results", 0),
+                "internal_dedup_dropped": search_diag.get("internal_dedup_dropped", 0),
+                "existing_dedup_dropped": len(raw_leads) - len(new_leads),
+                "dedup_count": (search_diag.get("internal_dedup_dropped", 0)
+                                + max(0, len(raw_leads) - len(new_leads))),
+                "new_leads": len(new_leads),
+                "company_count": _company_count,
                 "new_after_dedup": len(new_leads),
                 "a_grade": a_count,
                 "b_grade": b_count,
                 "c_grade": c_count,
-                "raw_results": search_diag.get("raw_results", 0),
+                "queries": search_diag.get("queries", 0),
+                "query_list": search_diag.get("query_list", []),
+                "deep_search_triggered": search_diag.get("deep_search_triggered", False),
                 "gov_dropped": search_diag.get("gov_dropped", 0),
                 "platform_dropped": search_diag.get("platform_dropped", 0),
                 "secondhand_dropped": search_diag.get("secondhand_dropped", 0),
@@ -5195,7 +5240,10 @@ def _run_lead_search_job(max_results: int = 30):
                 "seller_dropped": search_diag.get("seller_dropped", 0),
                 "non_company_dropped": search_diag.get("non_company_dropped", 0),
                 "dirty_dropped": search_diag.get("dirty_dropped", 0),
-                "queries": search_diag.get("queries", 0),
+                "raw_results": search_diag.get("raw_count", search_diag.get("raw_results", 0)),
+                "engine_status": search_diag.get("engine_status", {}),
+                "last_ok_engine": search_diag.get("last_ok_engine", ""),
+                "empty_rounds": search_diag.get("empty_rounds", 0),
             },
             "search_time": datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S"),
         }
@@ -6317,6 +6365,68 @@ async def api_admin_backfill_grades(request: Request):
     except Exception as e:
         print(f"[backfill] 评级回填失败: {e}")
         return JSONResponse({"ok": False, "message": f"回填失败：{e}"}, status_code=502)
+
+
+@app.post("/api/admin/leads/{record_id}/reset-score")
+async def api_admin_reset_lead_score(record_id: str, request: Request):
+    """一次性运维：把单条线索综合评分归位（默认 59）。仅 admin。
+    只动「综合评分」+ 与其同源的「评级」，并在「跟进备注」追加一条系统留痕（给认领销售看）。
+    body 可带 {"score": 59, "note": "..."}。返回变更前后对比，先 dry 看、确认后才由人工调用。"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info or user_info.get("role") != "admin":
+        return JSONResponse({"ok": False, "message": "需要管理员权限"}, status_code=403)
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    target_score = body.get("score", 59)
+    try:
+        target_score = int(float(target_score))
+    except (TypeError, ValueError):
+        return JSONResponse({"ok": False, "message": "score 必须是整数"}, status_code=400)
+    target_score = max(0, min(100, target_score))
+    note_extra = str(body.get("note", "")).strip()
+    try:
+        tid = _ensure_leads_table()
+        resp = _feishu_api(
+            "GET", f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records/{record_id}")
+        rec = resp.get("data", {}).get("record", {})
+        fields = rec.get("fields", {})
+        if not fields:
+            return JSONResponse({"ok": False, "message": "线索不存在"}, status_code=404)
+        company = _tv(fields.get("公司/机构"))
+        old_score_raw = _tv(fields.get("综合评分"))
+        old_grade = _tv(fields.get("评级"))
+        try:
+            old_score = int(float(old_score_raw))
+        except (TypeError, ValueError):
+            old_score = None
+        new_grade = _grade_from_score(target_score)
+        stamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
+        base_note = (f"[{stamp} 系统] 综合评分由 {old_score_raw or '空'} 归位为 {target_score}"
+                     f"（可达性闸门59档：company+经销类买家+有官网+暂无强联系方式）；评级 {new_grade}。")
+        if note_extra:
+            base_note += note_extra
+        old_note = _tv(fields.get("跟进备注"))
+        merged_note = (old_note + "\n" + base_note).strip() if old_note else base_note
+        _update_leads_record(record_id, {
+            "综合评分": target_score,
+            "评级": new_grade,
+            "跟进备注": merged_note[:5000],
+        })
+        _invalidate_leads_cache()
+        return {
+            "ok": True, "record_id": record_id, "company": company,
+            "before": {"score": old_score, "grade": old_grade},
+            "after": {"score": target_score, "grade": new_grade},
+            "claimer": _tv(fields.get("认领人")),
+            "note_appended": base_note,
+        }
+    except Exception as e:
+        print(f"[admin] 线索分数归位失败: {e}")
+        return JSONResponse({"ok": False, "message": f"归位失败：{e}"}, status_code=502)
 
 
 @app.post("/api/leads/{record_id}/enrich")
