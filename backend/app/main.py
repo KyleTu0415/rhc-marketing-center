@@ -840,6 +840,7 @@ LEADS_FIELDS_SCHEMA = [
     {"field_name": "页面类型", "type": 1},   # 文本：company/directory/b2b_platform/news_report/navigation/competitor/unknown
     {"field_name": "买家类型", "type": 1},   # 文本：importer/distributor/wholesaler/dealer/hospital/clinic/manufacturer/unknown（用文本避免单选枚举置空）
     {"field_name": "系统排除", "type": 1},   # 文本：AI/规则判定非买家时写排除原因（如 ai:not_company），公海池过滤；留空=正常。只标记不删除，可回滚
+    {"field_name": "质量标记", "type": 1},   # 文本：一档规则直接定性跳过Coze时写 rule_finalized，便于误杀申诉回溯；空=经Coze或未落规则判定
 ]
 
 
@@ -2659,6 +2660,103 @@ _TARGET_SITES = []  # B2B平台 site: 搜索结果多为产品/目录页而非�
 
 _search_results_cache = {"data": None, "ts": 0.0}
 _SEARCH_CACHE_TTL = 30  # 搜索结果30秒缓存
+# P2：每类丢弃原因落「搜索丢弃日志」时最多保留的样本条数（控制写库量）
+_DROP_SAMPLE_PER_REASON = 5
+_DROP_LOG_TABLE_NAME = "搜索丢弃日志"
+# 丢弃原因英文键 → 中文标签（落「搜索丢弃日志」用人读标签）
+_DROP_LABELS = {
+    "gov": "政府/教育/官方贸易页", "seller": "卖家货架/经销栏目页",
+    "platform": "B2B/电商撮合平台", "secondhand": "二手/翻新设备",
+    "manufacturer": "工厂/制造商卖家", "non_company": "非公司主体页",
+    "dirty": "脏公司名/搜索词短语",
+}
+# 丢弃原因 → 精确规则名（落「搜索丢弃日志」rule_name，便于误杀时定位具体规则）
+_DROP_RULE_NAMES = {
+    "gov": "rule_gov_edu_url",
+    "seller": "rule_seller_or_section_url",
+    "platform": "rule_platform_title",
+    "secondhand": "rule_secondhand_result",
+    "manufacturer": "rule_manufacturer_title",
+    "non_company": "rule_non_company_title",
+    "dirty": "rule_dirty_company_name",
+}
+_drop_log_table_id = None
+
+
+def _ensure_drop_log_table():
+    """确保飞书存在「搜索丢弃日志」表（P2：丢弃明细可追溯），返回 table_id。懒加载单例。"""
+    global _drop_log_table_id
+    if _drop_log_table_id:
+        return _drop_log_table_id
+    if not FEISHU_ATK:
+        raise RuntimeError("FEISHU_APP_TOKEN 未配置")
+    resp = _feishu_api("GET", f"/bitable/v1/apps/{FEISHU_ATK}/tables?page_size=100")
+    for t in resp.get("data", {}).get("items", []):
+        if t.get("name") == _DROP_LOG_TABLE_NAME:
+            _drop_log_table_id = t.get("table_id")
+            return _drop_log_table_id
+    fields = [
+        {"field_name": "标题", "type": 1},    # 文本（主字段）
+        {"field_name": "丢弃原因", "type": 1},
+        {"field_name": "规则名", "type": 1},   # 精确规则名，如 rule_secondhand_title
+        {"field_name": "本轮挡掉总数", "type": 1},  # 该轮该原因挡掉的总数（不止样本5条）
+        {"field_name": "链接", "type": 1},
+        {"field_name": "命中搜索词", "type": 1},
+        {"field_name": "轮次", "type": 1},
+        {"field_name": "记录时间", "type": 1},
+    ]
+    resp = _feishu_api("POST", f"/bitable/v1/apps/{FEISHU_ATK}/tables",
+                       {"table": {"name": _DROP_LOG_TABLE_NAME,
+                                  "default_view_name": "丢弃明细",
+                                  "fields": fields}})
+    _drop_log_table_id = resp.get("data", {}).get("table_id")
+    if not _drop_log_table_id:
+        raise RuntimeError(f"创建「{_DROP_LOG_TABLE_NAME}」表失败: {resp}")
+    print(f"[leads] 已创建飞书表「{_DROP_LOG_TABLE_NAME}」: {_drop_log_table_id}")
+    return _drop_log_table_id
+
+
+def _persist_drop_logs(search_diag: dict, round_id: int):
+    """P2：把本轮丢弃样本批量写入飞书「搜索丢弃日志」。best-effort，任何异常只记录不影响主流程。"""
+    try:
+        samples = (search_diag or {}).get("drop_samples") or {}
+        if not samples:
+            return 0
+        tid = _ensure_drop_log_table()
+        now_iso = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+        # 各原因本轮挡掉总数（与 stats 同口径），写进每条样本行，便于直接汇总
+        _count_keys = {
+            "gov": "gov_dropped", "seller": "seller_dropped", "platform": "platform_dropped",
+            "secondhand": "secondhand_dropped", "manufacturer": "manufacturer_dropped",
+            "non_company": "non_company_dropped", "dirty": "dirty_dropped",
+        }
+        records = []
+        for reason_key, items in samples.items():
+            label = _DROP_LABELS.get(reason_key, reason_key)
+            rule_name = _DROP_RULE_NAMES.get(reason_key, reason_key)
+            total_n = search_diag.get(_count_keys.get(reason_key, ""), len(items))
+            for it in items[:_DROP_SAMPLE_PER_REASON]:
+                records.append({"fields": {
+                    "标题": (it.get("title") or "(无标题)")[:200],
+                    "丢弃原因": label,
+                    "规则名": rule_name,
+                    "本轮挡掉总数": str(total_n),
+                    "链接": (it.get("url") or "")[:500],
+                    "命中搜索词": (it.get("query") or "")[:200],
+                    "轮次": str(round_id),
+                    "记录时间": now_iso,
+                }})
+        if not records:
+            return 0
+        # 飞书批量建记录上限 500/次，这里每类最多5条×7类≤35，单次足够
+        _feishu_api("POST",
+                    f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records/batch_create",
+                    {"records": records})
+        print(f"[leads] 第{round_id}轮丢弃明细落盘 {len(records)} 条 → 「{_DROP_LOG_TABLE_NAME}」")
+        return len(records)
+    except Exception as de:
+        print(f"[leads] 丢弃明细落盘失败（不影响搜索）: {de}")
+        return 0
 
 
 def _build_search_queries(custom_queries: Optional[list] = None):
@@ -3682,6 +3780,37 @@ def _finalize_lead_score(score, lead_info: dict, page_type: str, buyer_type: str
     if pt == "company" and bt == "manufacturer":
         return 5
     return _apply_score_gate(score, lead_info, pt, bt)
+
+
+def _rule_finalized_classification(page_type: str, buyer_type: str, lead: dict) -> bool:
+    """三档分流的第一档（IT 2026-09-20）：规则层是否已能"完全定性"。
+    命中 → 跳过 Coze、落库即固定分+系统排除、不触发补搜。一档只包含两类高置信主体：
+      1) host/规则明确的非公司页（竞品 competitor / 黄页 directory / 平台 / 新闻 / 导航）；
+      2) 假标题、长标题产品页（_score_penalty，规则已给固定低分）。
+    注意（IT 2026-09-20 补充）：规则粗判 company+manufacturer **不进一档**——标题/粗判
+    容易误伤 "Authorized Manufacturer Distributor" 这类经销商，统一降二档送 Coze 复核。
+    host 强制的 manufacturer 若未来出现，可凭 host 标记单独判，当前 host 只强制 competitor/directory。
+    字段全空（unknown）→ 第三档送 Coze 定夺。判定保守，宁送 Coze 也不漏掉真买家。"""
+    pt = (page_type or "").strip().lower()
+    if _is_excluded_page_type(pt):          # directory/b2b_platform/news_report/navigation/competitor
+        return True
+    if lead.get("_score_penalty"):          # 假标题/长标题产品页，规则已给固定低分
+        return True
+    return False
+
+
+def _rule_finalized_category(page_type: str, buyer_type: str, lead: dict) -> str:
+    """一档跳过 Coze 的线索，返回写入「系统排除」的**具体类别**（IT 2026-09-20）：
+    competitor / directory / b2b_platform / news_report / navigation /
+    invalid_title（假标题）/ product_shelf（长标题货架/产品页）。非一档返回空串。"""
+    pt = (page_type or "").strip().lower()
+    if _is_excluded_page_type(pt):
+        return pt                           # competitor/directory/b2b_platform/news_report/navigation
+    if lead.get("_long_title_reason") == "long_title_product_page":
+        return "product_shelf"
+    if lead.get("_score_penalty"):
+        return "invalid_title"
+    return ""
 
 
 # 采购/经销侧买家类型：身份已识别、只差联系方式的真实潜客
@@ -4791,6 +4920,20 @@ def _run_lead_search(max_results: int = 30, custom_queries: Optional[list] = Non
     secondhand_dropped = 0  # 二手/翻新设备页被过滤的条数
     manufacturer_dropped = 0  # 工厂/制造商卖家标题被过滤的条数
     non_company_dropped = 0  # 非公司主体页面（展会联系页/活动页）被过滤的条数
+    # P2 丢弃明细：每类最多保留 _DROP_SAMPLE_PER_REASON 条样本（标题+URL+命中query），
+    # 搜索结束后落飞书「搜索丢弃日志」，供 IT 核对规则是否误伤、真买家是不是被错杀。
+    _drop_samples = {"gov": [], "seller": [], "platform": [], "secondhand": [],
+                     "manufacturer": [], "non_company": [], "dirty": []}
+
+    def _record_drop(reason_key: str, rec: dict):
+        _bucket = _drop_samples.get(reason_key)
+        if _bucket is not None and len(_bucket) < _DROP_SAMPLE_PER_REASON:
+            _bucket.append({
+                "title": (rec.get("title", "") or "")[:200],
+                "url": (rec.get("url", "") or "")[:500],
+                "query": (rec.get("_query", "") or "")[:200],
+            })
+
     # 搜索引擎名称（用于来源字段）
     engine_name = "Brave搜索" if use_brave else "DuckDuckGo搜索"
     for r in all_raw:
@@ -4799,35 +4942,44 @@ def _run_lead_search(max_results: int = 30, custom_queries: Optional[list] = Non
         # 政府/军队/教育/官方贸易指南页（非买家主体），丢弃
         if _is_gov_edu_result(_r_url):
             gov_dropped += 1
+            _record_drop("gov", r)
             continue
         # 电商货架/购物路径/找经销商栏目（如 /product-category/...、/distributors/）不是买家主体，丢弃
         if _is_seller_or_section_url(_r_url):
             seller_dropped += 1
+            _record_drop("seller", r)
             continue
         # 标题自述为 B2B/电商撮合平台或采购门户（非单一买家），丢弃
         if _is_platform_title(_r_title):
             platform_dropped += 1
+            _record_drop("platform", r)
             continue
         # 二手/翻新设备交易页，入池前直接丢弃（搜索引擎负词挡不住 "used + 插词 + equipment"）
         if _is_secondhand_result(_r_url, _r_title):
             secondhand_dropped += 1
+            _record_drop("secondhand", r)
             continue
         # 工厂/制造商自述标题（同行卖家，非采购方），直接丢弃；其余制造商交由 AI 分类闸门兜底
         if _is_manufacturer_title(_r_title):
             manufacturer_dropped += 1
+            _record_drop("manufacturer", r)
             continue
         # 展会联系页/活动页/目录页等非公司主体页面，丢弃
         if _is_non_company_title(_r_title):
             non_company_dropped += 1
+            _record_drop("non_company", r)
             continue
         info = _extract_company_info(_r_title, r.get("snippet", ""), _r_url)
         if not info["company_name"] or len(info["company_name"]) < 3:
             dirty_dropped += 1
+            _record_drop("dirty", r)
             continue
         # 脏公司名过滤：搜索词式短语（含冒号/import/多关键词/纯产品词）不是真实公司，直接丢弃，
         # 避免污染公海池、邮件主题与评分（如 "Brazil company: Veterinary ... import"）
         if not _clean_company_name(info["company_name"]):
             dirty_dropped += 1
+            _record_drop("dirty", {"title": info.get("company_name", ""),
+                                   "url": _r_url, "_query": r.get("_query", "")})
             continue
         company_key = info["company_name"].lower().strip()
         if company_key in seen_companies:
@@ -4908,6 +5060,8 @@ def _run_lead_search(max_results: int = 30, custom_queries: Optional[list] = Non
             "empty_rounds": empty_rounds,
             "engine_status": dict(_lead_search_diag["engine_status"]),
             "last_ok_engine": _lead_search_diag["last_ok_engine"],
+            # P2 丢弃明细：{原因: [{title,url,query}...]}，供落盘与误伤核对
+            "drop_samples": {k: v for k, v in _drop_samples.items() if v},
         }
     except Exception as _diag_e:
         print(f"[search] 诊断信息挂载失败（不影响线索结果）: {_diag_e}")
@@ -5015,6 +5169,7 @@ def _run_lead_search_job(max_results: int = 30, custom_queries: Optional[list] =
 
     _search_in_progress = True
     leads_with_record_ids = []
+    coze_leads = []  # 需送 Coze 复核/定夺的真实主体（三档分流后才有后台线程持有锁）
     try:
         _lead_search_job["searching"] = True
         _lead_search_job["phase"] = "正在把上一轮线索整理进公海池…"
@@ -5044,6 +5199,12 @@ def _run_lead_search_job(max_results: int = 30, custom_queries: Optional[list] =
         _lead_search_job["searching"] = False
         _lead_search_job["phase"] = "正在去重、评分并写入线索表…"
 
+        # P2：丢弃明细异步落飞书「搜索丢弃日志」（best-effort，不阻塞搜索/不占用锁时间）
+        if search_diag.get("drop_samples"):
+            threading.Thread(
+                target=_persist_drop_logs, args=(search_diag, round_id),
+                daemon=True).start()
+
         # 2) 与已有线索去重
         try:
             existing_leads = _fetch_leads(force_refresh=True)
@@ -5056,6 +5217,7 @@ def _run_lead_search_job(max_results: int = 30, custom_queries: Optional[list] =
         now_iso = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
         leads_with_record_ids = []
         _company_count = 0  # 规则初判为 company 主体的新线索数（供 stats 体检）
+        _rule_finalized_count = 0  # 规则层已完全定性、将跳过 Coze 的新线索数（三档分流·第一档）
         for lead in new_leads:
             # 先用规则兜底分（Coze 评分改到后台异步跑，避免阻塞 API 超时）
             _pt_init = _rule_guess_page_type(
@@ -5070,8 +5232,9 @@ def _run_lead_search_job(max_results: int = 30, custom_queries: Optional[list] =
             if lead.get("_score_penalty"):
                 score = lead.get("score", 5)
                 print(f"[search] 假线索/长标题跳过评分: {lead.get('company_name','')[:30]} → {score}分")
-            elif _is_excluded_page_type(_pt_init) or (_pt_init == "company" and _bt_init == "manufacturer"):
-                # 规则即可判定的非公司页/同行：落库即固定分（竞品5/其余10），不挂45占位分
+            elif _is_excluded_page_type(_pt_init):
+                # 规则/host 明确的非公司页（竞品5/黄页等10）：落库即固定分，不挂占位分
+                # 注意：规则粗判 company+manufacturer 不在此列，降二档走兜底分并送 Coze（防误伤经销商）
                 score = _finalize_lead_score(0, {}, _pt_init, _bt_init)
                 lead["score"] = score
             else:
@@ -5087,6 +5250,10 @@ def _run_lead_search_job(max_results: int = 30, custom_queries: Optional[list] =
                     "linkedin": "",
                 }, _pt_init, _bt_init)
                 lead["score"] = score
+            # 三档分流标记：规则完全定性 → 后台不送 Coze、不补搜；company/unknown → 送 Coze
+            lead["_rule_finalized"] = _rule_finalized_classification(_pt_init, _bt_init, lead)
+            if lead["_rule_finalized"]:
+                _rule_finalized_count += 1
             fields = {
                 "线索标题": f"{lead.get('company_name', '')}（{lead.get('country', '')}）",
                 "商机类型": "渠道动态",
@@ -5118,10 +5285,13 @@ def _run_lead_search_job(max_results: int = 30, custom_queries: Optional[list] =
                 "买家类型": _bt_init,
                 "电话": lead.get("phone", "") or "",
             }
-            # 规则阶段即可判定的非公司页/同行：落库即标记系统排除（rule: 前缀）
-            _ex_init = _ai_exclude_reason(_pt_init, _bt_init)
-            if _ex_init:
-                fields["系统排除"] = "rule:" + _ex_init.split(":", 1)[-1]
+            # 一档（规则完全定性、跳过 Coze）：落库即写"具体类别"系统排除（非笼统文案），
+            # 并打 quality_flag=rule_finalized 便于日后误杀申诉时回溯是规则直接判定的。
+            # 规则粗判 manufacturer 已降二档，这里 _rule_finalized_category 不会再给 manufacturer。
+            _ex_cat = _rule_finalized_category(_pt_init, _bt_init, lead) if lead.get("_rule_finalized") else ""
+            if _ex_cat:
+                fields["系统排除"] = "rule:" + _ex_cat
+                fields["质量标记"] = "rule_finalized"
             try:
                 resp = _feishu_api(
                     "POST",
@@ -5138,50 +5308,39 @@ def _run_lead_search_job(max_results: int = 30, custom_queries: Optional[list] =
         _invalidate_leads_cache()
 
         # 4) 后台异步 Coze 评分 + 补搜（不阻塞 API 返回）
-        if leads_with_record_ids:
+        # 三档分流（IT 2026-09-20）：规则已完全定性的（竞品/黄页/平台/新闻/导航/同行/假标题/
+        # 长标题产品页）落库即固定分+系统排除，后台既不送 Coze 也不补搜，省 60-70% 无效调用、
+        # 且不再拖长搜索锁；只有规则粗判 company（待复核）或 unknown（待定夺）的才送 Coze+补搜。
+        coze_leads = [l for l in leads_with_record_ids if not l.get("_rule_finalized")]
+        skipped_finalized = [l for l in leads_with_record_ids if l.get("_rule_finalized")]
+        if coze_leads:
+            print(f"[search] 本轮新线索{len(leads_with_record_ids)}条："
+                  f"规则定性跳过Coze {len(skipped_finalized)}条，送Coze复核/定夺 {len(coze_leads)}条")
+
             def _background_score_and_enrich():
                 try:
-                    # 先跑 Coze 评分，更新飞书表
-                    for lead in leads_with_record_ids:
+                    # 先跑 Coze 评分，更新飞书表（仅 company 粗判 / 字段全空两档）
+                    for lead in coze_leads:
                         try:
-                            if lead.get("_score_penalty"):
-                                # 假线索不走 Coze：分类直接规则粗判（多为 directory/navigation）
-                                page_type = _rule_guess_page_type(
-                                    lead.get("website", ""),
-                                    lead.get("page_title", ""),
-                                    lead.get("page_snippet", ""))
-                                buyer_type = _rule_guess_buyer_type(
-                                    lead.get("website", ""),
-                                    lead.get("page_title", ""),
-                                    lead.get("page_snippet", ""))
-                                # 域名强制分类兜底（假线索分支不跑 Coze）
-                                page_type, buyer_type = _apply_host_page_override(
-                                    page_type, buyer_type, lead.get("website", ""))
-                            else:
-                                new_score, page_type, buyer_type = asyncio.run(
-                                    call_coze_scoring_workflow(lead))
-                                lead["score"] = new_score
+                            new_score, page_type, buyer_type = asyncio.run(
+                                call_coze_scoring_workflow(lead))
+                            lead["score"] = new_score
                             lead["page_type"] = page_type
                             lead["buyer_type"] = buyer_type
                             if lead.get("_record_id"):
                                 upd_fields = {"页面类型": page_type or "unknown",
-                                              "买家类型": buyer_type or "unknown"}
+                                              "买家类型": buyer_type or "unknown",
+                                              "综合评分": lead.get("score", 0)}
                                 # 评级始终按当前分数同源回写飞书「评级」列（修复撕裂数据的关键一环）
                                 upd_fields["评级"] = _grade_from_score(lead.get("score", 0))
-                                if not lead.get("_score_penalty"):
-                                    upd_fields["综合评分"] = lead.get("score", 0)
                                 # 分数变化后评级与跟进话术同步对齐（修复"低分却给 A 级建议"）
                                 lead["confidence"] = _grade_from_score(lead.get("score", 0))
-                                lead["page_type"] = page_type
-                                lead["buyer_type"] = buyer_type
                                 lead["ai_suggestion"] = _generate_ai_suggestion(lead)
                                 upd_fields["摘要"] = (lead.get("ai_suggestion", "") or "")[:2000]
-                                # 分类闸门：非买家/同行 → 标记系统排除（只标记不删除，公海池过滤）
-                                # 假线索分支是规则粗判，原因用 rule: 前缀；Coze 分支用 ai: 前缀
+                                # 分类闸门：非买家/同行 → 标记系统排除（只标记不删除，公海池过滤，ai: 前缀）
                                 _ex = _ai_exclude_reason(page_type, buyer_type)
                                 if _ex:
-                                    _prefix = "rule:" if lead.get("_score_penalty") else "ai:"
-                                    _reason = _prefix + _ex.split(":", 1)[-1]
+                                    _reason = "ai:" + _ex.split(":", 1)[-1]
                                     upd_fields["系统排除"] = _reason
                                     lead["_system_excluded"] = _reason
                                 _feishu_api(
@@ -5190,8 +5349,8 @@ def _run_lead_search_job(max_results: int = 30, custom_queries: Optional[list] =
                                     {"fields": upd_fields})
                         except Exception as se:
                             print(f"[search-bg] Coze评分失败: {lead.get('company_name','')}: {se}")
-                    # 再跑补搜
-                    _start_enrichment_background(leads_with_record_ids)
+                    # 再跑补搜：只补 Coze 复核/定夺过的真实主体，规则定性的非买家不补搜
+                    _start_enrichment_background(coze_leads)
                 except Exception as e:
                     print(f"[search-bg] 后台评分+补搜异常: {e}")
                 finally:
@@ -5275,7 +5434,7 @@ def _run_lead_search_job(max_results: int = 30, custom_queries: Optional[list] =
             "cached": False,
             "empty_reason": empty_reason,
             "diag": search_diag,
-            "enrichment": "started" if leads_with_record_ids else "none",
+            "enrichment": "started" if coze_leads else "none",
             "stats": {
                 "total_found": len(raw_leads),
                 "raw_count": search_diag.get("raw_count", search_diag.get("raw_results", 0)),
@@ -5286,6 +5445,9 @@ def _run_lead_search_job(max_results: int = 30, custom_queries: Optional[list] =
                                 + max(0, len(raw_leads) - len(new_leads))),
                 "new_leads": len(new_leads),
                 "company_count": _company_count,
+                # 三档分流：规则已定性跳过 Coze 数 / 实际送 Coze 数（节省无效调用可追溯）
+                "rule_finalized_skipped": _rule_finalized_count,
+                "coze_called": len(coze_leads),
                 "new_after_dedup": len(new_leads),
                 "a_grade": a_count,
                 "b_grade": b_count,
@@ -5307,9 +5469,9 @@ def _run_lead_search_job(max_results: int = 30, custom_queries: Optional[list] =
             },
             "search_time": datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S"),
         }
-        # 后台评分/补搜仍在跑时，先把搜索结果置为 finished 供前端展示；
-        # _search_in_progress 仍保持 True，由评分线程 finally 释放（防止下一轮与补搜互相去重）。
-        if leads_with_record_ids:
+        # 有送 Coze 的真实主体时，后台评分/补搜仍在跑，先置 finished 供前端展示，
+        # _search_in_progress 由评分线程 finally 释放；规则全部定性（无 Coze 任务）则立即释放锁。
+        if coze_leads:
             _lead_search_job["phase"] = "搜索完成，后台正在 AI 评分与补全联系方式…"
         else:
             _search_in_progress = False
@@ -5332,7 +5494,7 @@ def _run_lead_search_job(max_results: int = 30, custom_queries: Optional[list] =
         # 过期轮次一律不动锁与全局状态（交给最新轮次管理）。
         if _stale():
             return
-        if not leads_with_record_ids:
+        if not coze_leads:
             _search_in_progress = False
             _lead_search_job["running"] = False
             if _lead_search_job.get("status") == "running":
@@ -6491,35 +6653,6 @@ async def api_admin_reset_lead_score(record_id: str, request: Request):
     except Exception as e:
         print(f"[admin] 线索分数归位失败: {e}")
         return JSONResponse({"ok": False, "message": f"归位失败：{e}"}, status_code=502)
-
-
-@app.post("/api/admin/search-probe")
-async def api_admin_search_probe(request: Request):
-    """临时诊断（仅admin）：对给定 query 直接跑多引擎搜索，返回各引擎状态与前若干结果。"""
-    token = _get_token_from_request(request)
-    user_info = _verify_token(token) if token else None
-    if not user_info or user_info.get("role") != "admin":
-        return JSONResponse({"ok": False, "message": "需要管理员权限"}, status_code=403)
-    body = {}
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    q = str(body.get("query", "")).strip()
-    if not q:
-        return JSONResponse({"ok": False, "message": "缺 query"}, status_code=400)
-    _lead_search_diag["engine_status"] = {}
-    try:
-        res = await asyncio.to_thread(_search_ddg_leads, q, 8)
-        return {
-            "ok": True, "brave_key_present": bool(os.environ.get("BRAVE_API_KEY", "").strip()),
-            "engine_status": dict(_lead_search_diag["engine_status"]),
-            "last_ok_engine": _lead_search_diag["last_ok_engine"],
-            "count": len(res),
-            "samples": [{"title": r.get("title", "")[:80], "url": r.get("url", "")} for r in res[:8]],
-        }
-    except Exception as e:
-        return JSONResponse({"ok": False, "message": str(e)}, status_code=502)
 
 
 @app.post("/api/leads/{record_id}/enrich")
