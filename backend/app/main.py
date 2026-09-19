@@ -2708,6 +2708,10 @@ def _build_search_queries(custom_queries: Optional[list] = None):
 # 主动获客抓取层诊断（最近一次搜索各引擎真实状态），供API返显到界面
 _lead_search_diag = {"engine_status": {}, "last_ok_engine": "", "ts": 0.0}
 _search_in_progress = False  # 搜索并发锁：防止两次搜索互相干扰
+# 轮次代号：每次启动搜索自增。旧轮次的后台线程（评分/补搜）若仍在跑，
+# 只能更新飞书，不得再覆盖全局 _lead_search_job / 锁 / _last_search_record_ids，
+# 防止"新轮已开始、旧线程把 stats/结果串台写回"。
+_search_round = 0
 _last_search_record_ids: list[str] = []  # 上一次搜索结果中的 record_id 列表，用于下次搜索时推入公海池
 
 # 异步搜索任务状态：POST 立即启动后台线程并返回，前端轮询 /status 直到 finished/error。
@@ -4975,22 +4979,35 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
                 "message": "上一轮搜索仍在进行中（含后台评分+补搜），请稍候查看进度"}
 
     # 初始化任务状态并启动后台线程
+    global _search_round
+    _search_round += 1
+    round_id = _search_round
     _lead_search_job.update({
-        "running": True, "searching": True, "status": "running",
+        "running": True, "searching": True, "status": "running", "round": round_id,
         "phase": "正在全网搜索买家线索…", "done_queries": 0, "total_queries": 0,
         "result": None, "error": "", "ts": time.time(),
     })
     threading.Thread(target=_run_lead_search_job,
-                     args=(max_results,), kwargs={"custom_queries": custom_queries},
+                     args=(max_results,),
+                     kwargs={"custom_queries": custom_queries, "round_id": round_id},
                      daemon=True).start()
     return {"ok": True, "status": "started",
             "message": "搜索已开始，请稍候查看结果"}
 
 
-def _run_lead_search_job(max_results: int = 30, custom_queries: Optional[list] = None):
+def _run_lead_search_job(max_results: int = 30, custom_queries: Optional[list] = None,
+                         round_id: int = 0):
     """后台执行完整搜索管线（迁移公海→全网搜索→去重→写入飞书→启动评分/补搜）。
-    全程把进度/结果写入 _lead_search_job，供状态接口轮询；不向调用方抛异常。"""
+    全程把进度/结果写入 _lead_search_job，供状态接口轮询；不向调用方抛异常。
+    round_id：轮次代号，过期轮次只更新飞书、不写全局状态，避免与新轮串台。"""
     global _search_in_progress, _last_search_record_ids
+
+    def _current():
+        return _search_round
+
+    def _stale():
+        return _current() != round_id
+
     _search_in_progress = True
     leads_with_record_ids = []
     try:
@@ -5014,6 +5031,10 @@ def _run_lead_search_job(max_results: int = 30, custom_queries: Optional[list] =
         _lead_search_job["searching"] = True
         _lead_search_job["phase"] = "正在全网搜索买家线索…"
         raw_leads = _run_lead_search(max_results, custom_queries=custom_queries)
+        # 搜索耗时较长：若期间已启动更新一轮，则本轮作废，只保留已写飞书的数据，不碰全局结果
+        if _stale():
+            print(f"[search] 轮次{round_id}已过期（当前{_current()}），放弃全局结果写入")
+            return
         search_diag = getattr(raw_leads, "_search_diag", None) or {}
         _lead_search_job["searching"] = False
         _lead_search_job["phase"] = "正在去重、评分并写入线索表…"
@@ -5106,8 +5127,9 @@ def _run_lead_search_job(max_results: int = 30, custom_queries: Optional[list] =
                 leads_with_record_ids.append(lead)
             except Exception as we:
                 print(f"[search] 写入线索表失败: {we}")
-        # 记录本次搜索结果的 record_id，供下次搜索时推入公海池
-        _last_search_record_ids = [l["_record_id"] for l in leads_with_record_ids if l.get("_record_id")]
+        # 记录本次搜索结果的 record_id，供下次搜索时推入公海池（仅最新轮次可写）
+        if not _stale():
+            _last_search_record_ids = [l["_record_id"] for l in leads_with_record_ids if l.get("_record_id")]
         _invalidate_leads_cache()
 
         # 4) 后台异步 Coze 评分 + 补搜（不阻塞 API 返回）
@@ -5168,12 +5190,13 @@ def _run_lead_search_job(max_results: int = 30, custom_queries: Optional[list] =
                 except Exception as e:
                     print(f"[search-bg] 后台评分+补搜异常: {e}")
                 finally:
-                    global _search_in_progress
-                    _search_in_progress = False
-                    _lead_search_job["running"] = False
-                    if _lead_search_job.get("status") == "finished":
-                        _lead_search_job["phase"] = "本轮 AI 评分与联系方式补全已完成"
-                    print("[search-bg] 后台任务全部完成，搜索锁已释放")
+                    # 仅最新轮次可释放锁/改全局；过期轮次的评分线程只收尾飞书写库
+                    if not _stale():
+                        _search_in_progress = False
+                        _lead_search_job["running"] = False
+                        if _lead_search_job.get("status") == "finished":
+                            _lead_search_job["phase"] = "本轮 AI 评分与联系方式补全已完成"
+                    print(f"[search-bg] 轮次{round_id} 后台任务收尾（stale={_stale()}），锁={'释放' if not _stale() else '保留给新轮'}")
             threading.Thread(target=_background_score_and_enrich, daemon=True).start()
 
         # 5) 为每条新线索自动创建消息通知（后台线程，不阻塞返回）
@@ -5215,7 +5238,10 @@ def _run_lead_search_job(max_results: int = 30, custom_queries: Optional[list] =
                     print(f"[messages] 搜索后自动推送消息失败: {e}")
             threading.Thread(target=_create_messages, daemon=True).start()
 
-        # 6) 缓存结果
+        # 6) 缓存结果（仅最新轮次可写，防止过期轮次覆盖新轮结果/stats）
+        if _stale():
+            print(f"[search] 轮次{round_id}完成前已过期，放弃结果缓存与状态写入")
+            return
         _search_results_cache["data"] = new_leads
         _search_results_cache["ts"] = time.time()
 
@@ -5290,13 +5316,17 @@ def _run_lead_search_job(max_results: int = 30, custom_queries: Optional[list] =
         import traceback
         print(f"[search] 主动搜索失败: {e}")
         traceback.print_exc()
-        _search_in_progress = False
-        _lead_search_job.update({
-            "running": False, "searching": False,
-            "status": "error", "error": f"搜索失败：{e}"})
+        if not _stale():
+            _search_in_progress = False
+            _lead_search_job.update({
+                "running": False, "searching": False,
+                "status": "error", "error": f"搜索失败：{e}"})
         return
     finally:
-        # 无后台评分线程时（或搜索阶段就异常）立即释放锁；有评分线程时由其 finally 释放
+        # 无后台评分线程时（或搜索阶段就异常）立即释放锁；有评分线程时由其 finally 释放。
+        # 过期轮次一律不动锁与全局状态（交给最新轮次管理）。
+        if _stale():
+            return
         if not leads_with_record_ids:
             _search_in_progress = False
             _lead_search_job["running"] = False
