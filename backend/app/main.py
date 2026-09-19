@@ -4654,7 +4654,7 @@ def _run_lead_search(max_results: int = 30, custom_queries: Optional[list] = Non
     诊断计数挂在返回列表对象的 _search_diag 属性上（列表可挂自定义属性）。"""
     queries = _build_search_queries(custom_queries=custom_queries)
     all_raw = []  # [{title, url, snippet}]
-    used_queries = list(queries[:min(len(queries), 25 if bool(os.environ.get("BRAVE_API_KEY", "").strip()) else 15)])
+    used_queries = []  # 实际执行过的 query（逐个 append，真实反映轮次；不按配额预填）
     seen_urls = set()
     empty_rounds = 0  # 连续空结果轮次，用于判断是否被搜索引擎限流
     # 控制搜索轮次与节奏：Brave 免费档 1 QPS，轮次太多既慢又耗额度；
@@ -4673,6 +4673,7 @@ def _run_lead_search(max_results: int = 30, custom_queries: Optional[list] = Non
             _lead_search_job["done_queries"] = i + 1
         except Exception:
             pass
+        used_queries.append(query)
         results = _search_ddg_leads(query, timeout=8 if use_brave else 6)
         if not results:
             empty_rounds += 1
