@@ -2954,9 +2954,9 @@ def reset_brave_breaker():
 
 def _ensure_brave_trip_table():
     """飞书「Brave熔断日志」表（幂等）：时间/原因/HTTP状态/剩余额度/进程内第几次/备注。"""
-    app_token = _FEISHU_APP_TOKEN
+    app_token = FEISHU_ATK
     def _list_tables():
-        resp = _feishu_api("GET", f"/open-apis/bitable/v1/apps/{app_token}/tables?page_size=200")
+        resp = _feishu_api("GET", f"/bitable/v1/apps/{app_token}/tables?page_size=200")
         return ((resp.get("data") or {}).get("items") or []) if isinstance(resp, dict) else []
     tid = None
     try:
@@ -2966,7 +2966,7 @@ def _ensure_brave_trip_table():
     except Exception:
         tid = None
     if not tid:
-        resp = _feishu_api("POST", f"/open-apis/bitable/v1/apps/{app_token}/tables",
+        resp = _feishu_api("POST", f"/bitable/v1/apps/{app_token}/tables",
                            {"table": {"name": _BRAVE_TRIP_LOG_TABLE_NAME,
                                       "default_view_name": "全部",
                                       "fields": [{"field_name": "时间", "type": 1},
@@ -2985,7 +2985,7 @@ def _persist_brave_trip(reason, status, remaining, now_iso):
         return False
     label = {"billing": "欠费/未授权(401/402)，已终止本轮",
              "rate_limited": "限流(429)，本轮熔断"}.get(reason, reason)
-    _feishu_api("POST", f"/open-apis/bitable/v1/apps/{_FEISHU_APP_TOKEN}/tables/{tid}/records",
+    _feishu_api("POST", f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records",
                 {"fields": {"时间": now_iso, "原因": label,
                             "HTTP状态": str(status if status is not None else ""),
                             "Brave剩余额度": str(remaining) if remaining is not None else "(未返回)",
