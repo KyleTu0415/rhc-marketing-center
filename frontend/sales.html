@@ -2930,6 +2930,7 @@ function normalizeLead(ld){
   n.emailPattern=leadPick(ld,['邮箱格式','email_pattern']);
   n.email=leadPick(ld,['邮箱','联系邮箱','email'])||(looksLikeEmail(n.emailPattern)?n.emailPattern:'');
   n.contact=leadPick(ld,['联系方式','contact']);
+  n.phone=leadPick(ld,['电话','phone','telephone']);
   n.decisionMaker=leadPick(ld,['决策人','decision_maker','联系人']);
   var li=leadPick(ld,['LinkedIn','linkedin']);
   n.linkedin=li;
@@ -3004,6 +3005,11 @@ function renderLeadCard(ld,scope){
     h+=lpcInfo('✉️','邮箱格式',epHtml);
   }
   if(n.website)h+=lpcInfo('🌐','官网','<a href="'+esc(n.website)+'" target="_blank" rel="noopener noreferrer">'+esc(n.website)+'</a>');
+  if(n.phone){
+    var pDigits=String(n.phone).replace(/[^\d+]/g,'');
+    var pHtml=(pDigits.length>=6)?'<a href="tel:'+esc(pDigits)+'">'+esc(n.phone)+'</a>':esc(n.phone);
+    h+=lpcInfo('📞','电话',pHtml);
+  }
   if(n.decisionMaker)h+=lpcInfo('👤','决策人',esc(n.decisionMaker));
   if(n.linkedin){
     var liHtml=n.linkedinUrl?'<a href="'+esc(n.linkedinUrl)+'" target="_blank" rel="noopener noreferrer">'+esc(n.linkedin)+'</a>':esc(n.linkedin);
@@ -3528,6 +3534,7 @@ function openCustomerDetail(rid,scope,writeMode){
   ph+=pf('🌐','官网',n.website?link(n.website,n.website):'');
   if(n.email)ph+=pf('✉️','邮箱','<a href="mailto:'+esc(n.email)+'">'+esc(n.email)+'</a>');
   else if(n.emailPattern)ph+=pf('✉️','邮箱格式',looksLikeEmail(n.emailPattern)?'<a href="mailto:'+esc(n.emailPattern)+'">'+esc(n.emailPattern)+'</a>':esc(n.emailPattern));
+  if(n.phone){var pd=String(n.phone).replace(/[^\d+]/g,'');ph+=pf('📞','电话',pd.length>=6?'<a href="tel:'+esc(pd)+'">'+esc(n.phone)+'</a>':esc(n.phone));}
   ph+=pf('👤','决策人',esc(n.decisionMaker));
   ph+=pf('💼','LinkedIn',n.linkedinUrl?link(n.linkedinUrl,n.linkedin):esc(n.linkedin));
   ph+=pf('🚢','进口记录',esc(n.importRecord),true);
