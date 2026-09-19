@@ -109,7 +109,9 @@ def main():
     for pt, exp in [("directory", 10), ("b2b_platform", 10), ("news_report", 10),
                     ("navigation", 10), ("competitor", 5), ("unknown", -1), ("company", -1)]:
         chk(f"fixed[{pt}]", ns["_excluded_page_score"](pt), exp)
-    chk("final 可达不封顶", ns["_finalize_lead_score"](88, {"website": "http://x.com"}, "company", "distributor"), 88)
+    # 新闸门三档：有强联系(邮箱)才不封顶；有官网+经销商→59；四要素空→45
+    chk("final 有邮箱不封顶", ns["_finalize_lead_score"](88, {"email_pattern": "b@x.com", "website": "http://x.com"}, "company", "distributor"), 88)
+    chk("final 官网经销商封顶59", ns["_finalize_lead_score"](88, {"website": "http://x.com"}, "company", "distributor"), 59)
     chk("final 不可达封顶45", ns["_finalize_lead_score"](90, {}, "company", "distributor"), 45)
     chk("final competitor=5", ns["_finalize_lead_score"](90, {}, "company", "manufacturer"), 5)
     chk("final directory=10", ns["_finalize_lead_score"](90, {}, "directory", "unknown"), 10)
@@ -157,6 +159,60 @@ def main():
     for bad in ["https://www.machineseeker.co.uk/", "https://bizzmed.co.za/", "https://www.trade.gov/x"]:
         rb = ns["_fetch_official_site_contacts"](bad)
         chk(f"拒抓[{bad.split('/')[2]}]", any(rb.values()), False)
+
+    print("== 第五批 a：竞品 host 规则层强制 competitor（不依赖 Coze）==")
+    hfp = ns["_host_forced_page_type"]
+    ovr = ns["_apply_host_page_override"]
+    comp_urls = ["https://www.dreveterinary.com/", "http://dreveterinary.com/products"]
+    for u in comp_urls:
+        chk(f"竞品host强制competitor[{u}]", hfp(u), "competitor")
+    # 即便 Coze 误判成 company/importer，host 覆盖也必须纠回 competitor
+    pt2, bt2 = ovr("company", "importer", "https://www.dreveterinary.com/")
+    chk("覆盖压过Coze误判(竞品)", (pt2, bt2), ("competitor", "importer"))
+    fin = ns["_finalize_lead_score"](88, {}, "competitor", "importer")
+    chk("竞品固定5分（即便粗分88）", fin, 5)
+
+    print("== 第五批 b：国别黄页 host 强制 directory / 固定10分 ==")
+    dir_urls = ["https://www.businesslist.co.ke/company/123",
+                "https://businesslist.co.za/x", "https://www.europages.co.uk/x"]
+    for u in dir_urls:
+        chk(f"黄页host强制directory[{u.split('/')[2]}]", hfp(u), "directory")
+    pt3, bt3 = ovr("company", "unknown", "https://www.businesslist.co.ke/company/1")
+    chk("覆盖压过Coze误判(黄页)", pt3, "directory")
+    fin2 = ns["_finalize_lead_score"](47, {}, "directory", "unknown")
+    chk("黄页固定10分（即便粗分47）", fin2, 10)
+
+    print("== 第五批 a/b：正常企业官网不得被强制分类 ==")
+    for u in ["https://valevetequipment.co.uk/", "https://www.bupo.com/",
+              "https://europages-vet-clinic.com/", "https://marivet.cl/contacto"]:
+        chk(f"企业官网不强制分类[{u.split('/')[2]}]", hfp(u), "")
+
+    print("== 第五批：可达性闸门三档（IT 定稿 59，不选 60）==")
+    gate = ns["_apply_score_gate"]
+    WEB = {"official_website": "https://www.goodvetdealer.com/"}
+    # 档1：有强联系信号（邮箱/决策人/LinkedIn）→ 不封顶
+    chk("有邮箱不封顶(78)", gate(78, {"email_pattern": "buyer@co.com"}, "company", "importer"), 78)
+    chk("有决策人不封顶(85)", gate(85, {"decision_maker": "John"}, "company", "distributor"), 85)
+    # 档2：无强联系 + 真官网 + company + 经销类买家 → 封顶 59
+    for bt in ["importer", "distributor", "wholesaler", "dealer"]:
+        chk(f"经销商官网封顶59[{bt}](88)", gate(88, dict(WEB), "company", bt), 59)
+        chk(f"经销商官网封顶59[{bt}](55不破)", gate(55, dict(WEB), "company", bt), 55)
+    # 59 仍算 C（B 线 60），保留"B=能联系上"
+    chk("59评级仍为C", ns["_grade_from_score"](59), "C")
+    chk("60评级才是B", ns["_grade_from_score"](60), "B")
+    # 档3：四要素弱、非合格公司 → 仍封顶 45
+    chk("无官网company经销商→45", gate(88, {}, "company", "importer"), 45)
+    chk("有官网但manufacturer→45", gate(88, dict(WEB), "company", "manufacturer"), 45)
+    chk("有官网但bt=unknown→45", gate(88, dict(WEB), "company", "unknown"), 45)
+    chk("有官网但pt非company→45", gate(88, dict(WEB), "news_report", "importer"), 45)
+    chk("四要素空非company→45", gate(88, {}, "", ""), 45)
+    chk("低分不抬升(30→30)", gate(30, {}, "company", "importer"), 30)
+    # 黄页 host 在进闸门前即被 host 覆盖强制 directory，finalize 整链固定10（不会进59档）
+    _pt, _bt = ns["_apply_host_page_override"]("company", "importer", "https://www.europages.co.uk/x")
+    chk("黄页host整链不进59档", ns["_finalize_lead_score"](88, {"website": "https://www.europages.co.uk/x"}, _pt, _bt), 10)
+    # 搜索引擎结果页不算真官网，即便伪报 company+importer 也只能到45
+    chk("搜索页URL不算官网→45",
+        gate(88, {"website": "https://www.google.com/search?q=vet"}, "company", "importer"), 45)
 
     print("\n====", "ALL_OK" if not FAILS else f"{len(FAILS)} FAILURES", "====")
     if FAILS:

@@ -2889,6 +2889,7 @@ _JUNK_HOST_MARKS = (
     "kompass.com", "europages.com", "thomasnet.com", "yellowpages", "yelp.com",
     "dnb.com", "tridge.com", "coimex", "ambalaj", "customs.info", "exim.com",
     "bizearch", "companylist", "hotfrog", "cylex", "brownbook", "findyello",
+    "businesslist", "listcompany", "companieslist",
     # 电商 / 零售平台
     "amazon.", "ebay.", "etsy.com", "aliexpress.com", "walmart.com",
     # 二手设备交易平台 / 分类信息广告
@@ -2948,6 +2949,36 @@ def _is_junk_result_url(url: str) -> bool:
     if "directory" in host:
         return True
     return False
+
+
+def _host_forced_page_type(url: str) -> str:
+    """规则层域名强制分类（不依赖 Coze）：
+    - 命中竞品域名 → competitor（固定 5 分，系统排除）；
+    - 命中平台/黄页/二手域名主体（含国别后缀，如 businesslist.co.ke、europages.co.uk）→ directory（10 分）。
+    无可判定返回空串。用于 Coze 误判/未跑时的硬兜底，防止竞品与黄页混入公司页高分。"""
+    try:
+        from urllib.parse import urlparse
+        host = urlparse((url or "").lower()).netloc.lower()
+    except Exception:
+        return ""
+    if not host:
+        return ""
+    if any(mark in host for mark in _COMPETITOR_HOST_MARKS):
+        return "competitor"
+    if any(_platform_mark_hit(host, m) for m in _JUNK_HOST_MARKS):
+        return "directory"
+    if "directory" in host:
+        return "directory"
+    return ""
+
+
+def _apply_host_page_override(page_type: str, buyer_type: str, url: str) -> tuple:
+    """域名强制分类覆盖：命中竞品/平台黄页 host 时，以规则判定为准（压过 Coze 误判）。
+    返回 (page_type, buyer_type)。竞品→competitor；平台黄页→directory。"""
+    forced = _host_forced_page_type(url)
+    if forced:
+        return forced, buyer_type
+    return page_type, buyer_type
 
 
 def _filter_junk_results(results: list):
@@ -3638,24 +3669,49 @@ def _finalize_lead_score(score, lead_info: dict, page_type: str, buyer_type: str
         return _excluded_page_score(pt)
     if pt == "company" and bt == "manufacturer":
         return 5
-    return _apply_score_gate(score, lead_info)
+    return _apply_score_gate(score, lead_info, pt, bt)
 
 
-def _apply_score_gate(score, lead_info: dict) -> int:
-    """评分出口闸门：无法触达的线索一律压到50分以下（封顶45）。"""
+# 采购/经销侧买家类型：身份已识别、只差联系方式的真实潜客
+_RESELLER_BUYER_TYPES = {"importer", "distributor", "wholesaler", "dealer"}
+
+
+def _has_direct_contact(lead_info: dict) -> bool:
+    """强联系信号：真实邮箱 / 决策人 / LinkedIn 任一存在即可直接触达（不含官网）。
+    官网只能证明主体真实，不能直接联系人，故单独拆出，用于闸门分档。"""
+    if _real_email(_lead_val(lead_info, "email_pattern", "邮箱格式", "联系邮箱", "email")):
+        return True
+    if _lead_val(lead_info, "decision_maker", "决策人"):
+        return True
+    if _lead_val(lead_info, "linkedin", "LinkedIn"):
+        return True
+    return False
+
+
+def _apply_score_gate(score, lead_info: dict, page_type: str = "", buyer_type: str = "") -> int:
+    """评分出口闸门，按可触达强度分三档（IT 2026-09-20 定稿）：
+    1) 有强联系信号（真实邮箱/决策人/LinkedIn）→ 不封顶，按真实分；
+    2) 无强联系，但有真实官网 + page_type=company + buyer_type∈
+       importer/distributor/wholesaler/dealer → 封顶 59（C 里排名最高，补全后自然升 B）；
+    3) 其余（四要素皆空且非合格公司）→ 仍封顶 45。
+    59 而非 60：保留"B(≥60)=至少能联系上"的业务语义。"""
     try:
         s = int(float(score))
     except (TypeError, ValueError):
         s = 30
     s = max(0, min(100, s))
-    if not _lead_is_reachable(lead_info):
-        s = min(s, 45)
-    return s
+    pt = (page_type or "").strip().lower()
+    bt = (buyer_type or "").strip().lower()
+    if _has_direct_contact(lead_info):
+        return s
+    if pt == "company" and bt in _RESELLER_BUYER_TYPES and _pick_real_website(lead_info):
+        return min(s, 59)
+    return min(s, 45)
 
 
-def _rule_fallback_score(lead_info: dict) -> int:
+def _rule_fallback_score(lead_info: dict, page_type: str = "", buyer_type: str = "") -> int:
     """规则兜底打分：Coze工作流不可用时使用。A=90/B=60/C=30 + 补搜信息加分；
-    出口同样经过可达性闸门（无法触达封顶45）。"""
+    出口同样经过可达性三档闸门（强联系不封顶/真经销商官网封顶59/其余封顶45）。"""
     grade = _lead_val(lead_info, "confidence", "评级") or "C"
     base_score = {"A": 90, "B": 60, "C": 30}.get(grade, 30)
     bonus = 0
@@ -3665,7 +3721,7 @@ def _rule_fallback_score(lead_info: dict) -> int:
         bonus += 3
     if _real_email(_lead_val(lead_info, "email_pattern", "邮箱格式", "联系邮箱", "email")):
         bonus += 5
-    return _apply_score_gate(min(100, base_score + bonus), lead_info)
+    return _apply_score_gate(min(100, base_score + bonus), lead_info, page_type, buyer_type)
 
 
 def _get_sales_coze_pat() -> str:
@@ -3851,10 +3907,12 @@ async def call_coze_scoring_workflow(lead_info: dict) -> tuple:
     def _fallback():
         pt = _rule_guess_page_type(source_url, page_title, page_snippet)
         bt = _rule_guess_buyer_type(source_url, page_title, page_snippet)
+        # 域名强制分类兜底：竞品/平台黄页 host 压过规则粗判（不依赖 Coze）
+        pt, bt = _apply_host_page_override(pt, bt, source_url)
         # 非公司页/同行：规则兜底也直接给固定分，不挂 45 占位分，避免与真实未补全公司混排
         if _is_excluded_page_type(pt) or (pt == "company" and bt == "manufacturer"):
             return _finalize_lead_score(0, norm, pt, bt), pt, bt
-        return _rule_fallback_score(norm), pt, bt
+        return _rule_fallback_score(norm, pt, bt), pt, bt
 
     if not pat or not wf_id:
         return _fallback()
@@ -3883,6 +3941,8 @@ async def call_coze_scoring_workflow(lead_info: dict) -> tuple:
                          or _rule_guess_page_type(source_url, page_title, page_snippet))
             buyer_type = (_normalize_buyer_type(parsed.get("buyer_type", ""))
                           or _rule_guess_buyer_type(source_url, page_title, page_snippet))
+            # 域名强制分类兜底：命中竞品/平台黄页 host 时压过 Coze 误判（如 MSD 被判 company）
+            page_type, buyer_type = _apply_host_page_override(page_type, buyer_type, source_url)
             # 非公司页固定分（竞品5/其余10）；company+manufacturer 同行5；其余走可达性闸门
             final_score = _finalize_lead_score(score, norm, page_type, buyer_type)
             return final_score, page_type, buyer_type
@@ -4914,6 +4974,9 @@ def _run_lead_search_job(max_results: int = 30):
                 lead.get("website", ""), lead.get("page_title", ""), lead.get("page_snippet", ""))
             _bt_init = _rule_guess_buyer_type(
                 lead.get("website", ""), lead.get("page_title", ""), lead.get("page_snippet", ""))
+            # 域名强制分类：竞品/平台黄页 host 不依赖 Coze 即落正确类型与固定分
+            _pt_init, _bt_init = _apply_host_page_override(
+                _pt_init, _bt_init, lead.get("website", ""))
             if lead.get("_score_penalty"):
                 score = lead.get("score", 5)
                 print(f"[search] 假线索/长标题跳过评分: {lead.get('company_name','')[:30]} → {score}分")
@@ -4932,7 +4995,7 @@ def _run_lead_search_job(max_results: int = 30):
                     "confidence": lead.get("confidence", "C"),
                     "decision_maker": "",
                     "linkedin": "",
-                })
+                }, _pt_init, _bt_init)
                 lead["score"] = score
             fields = {
                 "线索标题": f"{lead.get('company_name', '')}（{lead.get('country', '')}）",
@@ -5000,6 +5063,9 @@ def _run_lead_search_job(max_results: int = 30):
                                     lead.get("website", ""),
                                     lead.get("page_title", ""),
                                     lead.get("page_snippet", ""))
+                                # 域名强制分类兜底（假线索分支不跑 Coze）
+                                page_type, buyer_type = _apply_host_page_override(
+                                    page_type, buyer_type, lead.get("website", ""))
                             else:
                                 new_score, page_type, buyer_type = asyncio.run(
                                     call_coze_scoring_workflow(lead))
@@ -6295,18 +6361,28 @@ async def api_leads_enrich(record_id: str, req: Optional[EnrichLeadRequest] = No
                 update_fields["决策人"] = enriched["decision_maker"]
             if enriched.get("linkedin"):
                 update_fields["LinkedIn"] = enriched["linkedin"]
-            # 重评分
-            lead_info = {**{k: _tv(v) for k, v in fields.items()}, **enriched}
-            new_score, page_type, buyer_type = await call_coze_scoring_workflow(lead_info)
-            update_fields["综合评分"] = new_score
-            update_fields["评级"] = _grade_from_score(new_score)
-            if page_type:
-                update_fields["页面类型"] = page_type
-            if buyer_type:
-                update_fields["买家类型"] = buyer_type
-            _ex = _ai_exclude_reason(page_type, buyer_type)
-            if _ex:
-                update_fields["系统排除"] = _ex
+            # 重评分。反爬且未取得任何实际联系方式时跳过重评分：
+            # 此时没有任何新增可触达信号，重算只会因"有官网+行业"虚加分（如 Vale 45→56），属 bug。
+            try:
+                old_score = int(float(_tv(fields.get("综合评分"))))
+            except (TypeError, ValueError):
+                old_score = None
+            if enriched.get("antibot") and not light_got:
+                new_score = old_score if old_score is not None else 45
+                # 分数不动，评级与现有分数保持同源
+                update_fields["评级"] = _grade_from_score(new_score)
+            else:
+                lead_info = {**{k: _tv(v) for k, v in fields.items()}, **enriched}
+                new_score, page_type, buyer_type = await call_coze_scoring_workflow(lead_info)
+                update_fields["综合评分"] = new_score
+                update_fields["评级"] = _grade_from_score(new_score)
+                if page_type:
+                    update_fields["页面类型"] = page_type
+                if buyer_type:
+                    update_fields["买家类型"] = buyer_type
+                _ex = _ai_exclude_reason(page_type, buyer_type)
+                if _ex:
+                    update_fields["系统排除"] = _ex
             _update_leads_record(record_id, update_fields)
             _invalidate_leads_cache()
             return {"ok": True, "message": "轻补搜完成", "data": enriched, "new_score": new_score,
@@ -6371,6 +6447,9 @@ async def _scheduled_leads_search():
                     lead.get("website", ""), lead.get("page_title", ""), lead.get("page_snippet", ""))
                 buyer_type = _rule_guess_buyer_type(
                     lead.get("website", ""), lead.get("page_title", ""), lead.get("page_snippet", ""))
+                # 域名强制分类兜底（假线索分支不跑 Coze）
+                page_type, buyer_type = _apply_host_page_override(
+                    page_type, buyer_type, lead.get("website", ""))
                 # 规则即可判定的非公司页/同行：固定 5/10 分；其余假线索保留极低罚分
                 if _is_excluded_page_type(page_type) or (page_type == "company" and buyer_type == "manufacturer"):
                     score = _finalize_lead_score(0, {}, page_type, buyer_type)
