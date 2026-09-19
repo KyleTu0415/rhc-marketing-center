@@ -4621,6 +4621,30 @@ def _dedup_with_existing_leads(new_leads: list, existing_leads: list) -> list:
     return deduped
 
 
+def _build_custom_deep_queries(base_queries: list):
+    """custom 校准轮的深度兜底：从本轮 query 中抽取国家，围绕同一批国家用更宽的买家意图词扩展，
+    保证兜底仍在本轮主题（国家/采购方）内，而不是退回默认词池。"""
+    import re
+    neg = f"{_COMPETITOR_SITE_SUFFIX} {_SECONDHAND_SUFFIX}"
+    countries = []
+    for q in base_queries:
+        # 去掉 -site/-引号 等后按词比对国家表（含多词国家 Czech Republic）
+        plain = re.sub(r'-\S+', ' ', q).replace('"', ' ')
+        for c in _SEARCH_COUNTRIES.keys():
+            if c not in countries and re.search(rf"\b{re.escape(c)}\b", plain, flags=re.I):
+                countries.append(c)
+    if not countries:
+        return []
+    broad_terms = [
+        "veterinary equipment distributor",
+        "animal health products distributor",
+        "veterinary clinic equipment supplier",
+        "animal hospital equipment supplier",
+    ]
+    out = [f"{t} {c} {neg}" for c in countries for t in broad_terms]
+    return out[:12]
+
+
 def _build_deep_search_queries():
     """首轮结果不足时的兜底搜索：只保留真实买家身份/采购意图词，
     不再用展会参展商、协会会员、行业目录、批发清单（这些多为聚合/目录页，非买家主体）。"""
@@ -4698,7 +4722,11 @@ def _run_lead_search(max_results: int = 30, custom_queries: Optional[list] = Non
     if len(all_raw) < 5:
         print(f"[search] 首轮结果不足({len(all_raw)}条)，启动深度搜索补充...")
         deep_search_triggered = True
-        deep_queries = _build_deep_search_queries()
+        # custom 校准轮：围绕本轮国家/意图扩展；默认轮：用默认深搜词池
+        deep_queries = (_build_custom_deep_queries(custom_queries)
+                        if custom_queries else _build_deep_search_queries())
+        if not deep_queries:
+            deep_queries = _build_deep_search_queries()
         max_deep = min(len(deep_queries), 10 if use_brave else 8)
         for j, dq in enumerate(deep_queries[:max_deep]):
             results = _search_ddg_leads(dq, timeout=8 if use_brave else 6)
