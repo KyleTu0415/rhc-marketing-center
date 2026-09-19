@@ -2902,9 +2902,102 @@ def _parse_bing_html_results(html_text: str) -> list:
     return results
 
 
+# ===== Brave 熔断（防止额度到顶后在免费引擎上干等、防止超支）=====
+class BraveBillingError(Exception):
+    """401/402：欠费/未授权，直接终止本轮、熔断，不重试。"""
+
+
+class BraveRateLimitError(Exception):
+    """429：限流，单条退避重试1次；持续则熔断本轮。"""
+
+
+class BraveCircuitOpenError(Exception):
+    """熔断已打开，本次直接跳过 Brave（区别于本次请求刚触发的欠费/限流）。"""
+
+
+# 内存熔断态（重启清空；充值后调 reset 端点即可恢复）
+_brave_breaker = {
+    "open": False,          # 是否熔断中
+    "reason": "",           # billing / rate_limited
+    "tripped_at": "",       # 最近一次熔断时间
+    "last_status": None,    # 最近一次 HTTP 状态码
+    "remaining": None,      # Brave 返回的剩余额度（若响应头带）
+    "trip_count": 0,        # 本进程累计熔断次数
+}
+# 免费引擎回退的硬上限（熔断/限流触发时）：最多若干 query、总耗时封顶
+_FREE_FALLBACK_MAX_QUERIES = 3
+_FREE_FALLBACK_BUDGET_SEC = 30.0
+_BRAVE_TRIP_LOG_TABLE_NAME = "Brave熔断日志"
+
+
+def _trip_brave_breaker(reason: str, status=None, remaining=None, persist=True):
+    """熔断置位 + 打印告警 + 落盘一条熔断日志。reason: billing/rate_limited。"""
+    now_iso = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+    _brave_breaker.update({
+        "open": True, "reason": reason, "tripped_at": now_iso,
+        "last_status": status, "remaining": remaining,
+        "trip_count": _brave_breaker["trip_count"] + 1,
+    })
+    print(f"[brave-circuit] ⚠️ 熔断 reason={reason} http={status} "
+          f"剩余额度={remaining} 时间={now_iso} 第{_brave_breaker['trip_count']}次")
+    if persist:
+        try:
+            _persist_brave_trip(reason, status, remaining, now_iso)
+        except Exception as e:
+            print(f"[brave-circuit] 熔断日志落盘失败: {e}")
+
+
+def reset_brave_breaker():
+    _brave_breaker.update({"open": False, "reason": "", "last_status": None, "remaining": None})
+    print("[brave-circuit] 熔断已人工复位")
+
+
+def _ensure_brave_trip_table():
+    """飞书「Brave熔断日志」表（幂等）：时间/原因/HTTP状态/剩余额度/进程内第几次/备注。"""
+    app_token = _FEISHU_APP_TOKEN
+    def _list_tables():
+        resp = _feishu_api("GET", f"/open-apis/bitable/v1/apps/{app_token}/tables?page_size=200")
+        return ((resp.get("data") or {}).get("items") or []) if isinstance(resp, dict) else []
+    tid = None
+    try:
+        for t in _list_tables():
+            if t.get("name") == _BRAVE_TRIP_LOG_TABLE_NAME:
+                tid = t.get("table_id"); break
+    except Exception:
+        tid = None
+    if not tid:
+        resp = _feishu_api("POST", f"/open-apis/bitable/v1/apps/{app_token}/tables",
+                           {"table": {"name": _BRAVE_TRIP_LOG_TABLE_NAME,
+                                      "default_view_name": "全部",
+                                      "fields": [{"field_name": "时间", "type": 1},
+                                                 {"field_name": "原因", "type": 1},
+                                                 {"field_name": "HTTP状态", "type": 1},
+                                                 {"field_name": "Brave剩余额度", "type": 1},
+                                                 {"field_name": "进程内第几次", "type": 1},
+                                                 {"field_name": "备注", "type": 1}]}})
+        tid = (((resp or {}).get("data") or {}).get("table_id")) if isinstance(resp, dict) else None
+    return tid
+
+
+def _persist_brave_trip(reason, status, remaining, now_iso):
+    tid = _ensure_brave_trip_table()
+    if not tid:
+        return False
+    label = {"billing": "欠费/未授权(401/402)，已终止本轮",
+             "rate_limited": "限流(429)，本轮熔断"}.get(reason, reason)
+    _feishu_api("POST", f"/open-apis/bitable/v1/apps/{_FEISHU_APP_TOKEN}/tables/{tid}/records",
+                {"fields": {"时间": now_iso, "原因": label,
+                            "HTTP状态": str(status if status is not None else ""),
+                            "Brave剩余额度": str(remaining) if remaining is not None else "(未返回)",
+                            "进程内第几次": str(_brave_breaker["trip_count"]),
+                            "备注": "搜索已快速结束，未在免费引擎上长时间重试"}})
+    return True
+
+
 def _brave_api_search(query: str, timeout: int = 8) -> list:
     """Brave Search API（独立索引、机房IP不被封）。需环境变量 BRAVE_API_KEY。
-    返回 [{title, url, snippet}]；未配置 key 抛 RuntimeError 由上层回退。"""
+    返回 [{title, url, snippet}]；未配置 key 抛 RuntimeError 由上层回退。
+    401/402 抛 BraveBillingError；429 退避重试1次后抛 BraveRateLimitError。"""
     import urllib.parse as _up
     key = os.environ.get("BRAVE_API_KEY", "").strip()
     if not key:
@@ -2914,14 +3007,47 @@ def _brave_api_search(query: str, timeout: int = 8) -> list:
         "safesearch": "off", "result_filter": "web",
     })
     url = "https://api.search.brave.com/res/v1/web/search?" + qs
-    code, body = _http_fetch_with_headers(
-        url,
-        {"Accept": "application/json",
-         "X-Subscription-Token": key,
-         "User-Agent": _FIND_UA},
-        timeout, None)
+    # 熔断打开期间不再打 Brave（充值后由 reset/强制跑 端点复位）
+    if _brave_breaker.get("open"):
+        raise BraveCircuitOpenError("Brave 熔断中，跳过")
+    import urllib.request as _bur
+    import urllib.error as _berr
+    import time as _time
+    _headers = {"Accept": "application/json",
+                "X-Subscription-Token": key, "User-Agent": _FIND_UA}
+
+    def _do_request():
+        req = _bur.Request(url, headers=_headers, method="GET")
+        try:
+            with _bur.urlopen(req, timeout=timeout) as r:
+                hd = {k.lower(): v for k, v in r.headers.items()}
+                return getattr(r, "status", 200), r.read(1_500_000).decode("utf-8", "ignore"), hd
+        except _berr.HTTPError as e:
+            hd = {k.lower(): v for k, v in (e.headers.items() if e.headers else [])}
+            try:
+                bd = e.read(300_000).decode("utf-8", "ignore")
+            except Exception:
+                bd = ""
+            return e.code, bd, hd
+
+    code, body, resp_headers = _do_request()
+    remaining = resp_headers.get("x-ratelimit-remaining")
+    if code in (401, 402):
+        # 欠费/未授权：不重试，直接上抛由整轮熔断
+        raise BraveBillingError(f"Brave http{code}")
+    if code == 429:
+        # 限流：退避 2 秒，仅重试 1 次
+        _time.sleep(2)
+        code, body, resp_headers = _do_request()
+        remaining = resp_headers.get("x-ratelimit-remaining")
+        if code in (401, 402):
+            raise BraveBillingError(f"Brave http{code}")
+        if code == 429:
+            raise BraveRateLimitError("Brave 429 退避重试后仍限流")
     if code != 200 or not body:
         raise RuntimeError(f"Brave http{code}")
+    if remaining is not None:
+        _brave_breaker["remaining"] = remaining
     data = json.loads(body)
 
     # ① 优先取 web.results（标准路径）
@@ -3097,11 +3223,16 @@ def _filter_junk_results(results: list):
     return clean, len(results) - len(clean)
 
 
-def _multi_engine_search(query: str, timeout: int = 6) -> list:
+def _multi_engine_search(query: str, timeout: int = 6, skip_brave: bool = False,
+                         deadline: float = None) -> list:
     """主动获客单查询：有 BRAVE_API_KEY 优先 Brave；否则/失败再回退
     DDG GET → DDG POST → Bing。每个引擎结果先过滤聚合站，干净结果命中即返回；
-    每个引擎真实状态写入 _lead_search_diag，避免静默吞错导致"假无线索"。"""
+    每个引擎真实状态写入 _lead_search_diag，避免静默吞错导致"假无线索"。
+    skip_brave=True：熔断/免费回退模式，只打免费引擎。
+    deadline=time.monotonic() 截止点：超过后免费引擎直接放弃（30秒短上限）。
+    Brave 欠费/限流/熔断异常直接上抛，由搜索主循环决定是否熔断整轮。"""
     import urllib.parse as _up
+    import time as _time
     base_headers = {
         "User-Agent": _FIND_UA,
         "Accept": "text/html,application/xhtml+xml",
@@ -3109,7 +3240,7 @@ def _multi_engine_search(query: str, timeout: int = 6) -> list:
     }
     q = _up.urlencode({"q": query})
     engines = []
-    if os.environ.get("BRAVE_API_KEY", "").strip():
+    if os.environ.get("BRAVE_API_KEY", "").strip() and not skip_brave:
         engines.append(("brave", None, None, None, _brave_api_search, True))
     engines += [
         ("ddg_get", "https://html.duckduckgo.com/html/?" + q,
@@ -3121,6 +3252,10 @@ def _multi_engine_search(query: str, timeout: int = 6) -> list:
          dict(base_headers), None, _parse_bing_html_results, False),
     ]
     for name, url, headers, data, parser, is_brave in engines:
+        # 免费回退模式：非 Brave 引擎受 30 秒总预算约束，超时即放弃，不再干等
+        if not is_brave and deadline is not None and _time.monotonic() > deadline:
+            _lead_search_diag["engine_status"][name] = "免费回退总预算超时，跳过"
+            continue
         try:
             if is_brave:
                 raw = _brave_api_search(query, timeout)
@@ -3142,15 +3277,19 @@ def _multi_engine_search(query: str, timeout: int = 6) -> list:
             if clean:
                 _lead_search_diag["last_ok_engine"] = name
                 return clean
+        except (BraveBillingError, BraveRateLimitError, BraveCircuitOpenError):
+            raise  # 熔断类异常上抛，主循环据此快速结束
         except Exception as e:
             _lead_search_diag["engine_status"][name] = type(e).__name__
             continue
     return []
 
 
-def _search_ddg_leads(query: str, timeout: int = 8) -> list:
+def _search_ddg_leads(query: str, timeout: int = 8, skip_brave: bool = False,
+                      deadline: float = None) -> list:
     """主动获客搜索（多引擎兜底），返回 [{title, url, snippet}]。"""
-    return _multi_engine_search(query, timeout=min(timeout, 6))
+    return _multi_engine_search(query, timeout=min(timeout, 6),
+                                skip_brave=skip_brave, deadline=deadline)
 
 
 
@@ -4830,51 +4969,100 @@ def _run_lead_search(max_results: int = 30, custom_queries: Optional[list] = Non
         _lead_search_job["phase"] = "正在全网搜索买家线索…"
     except Exception:
         pass
-    for i, query in enumerate(queries[:max_queries]):
-        try:
-            _lead_search_job["done_queries"] = i + 1
-        except Exception:
-            pass
-        used_queries.append(query)
-        results = _search_ddg_leads(query, timeout=8 if use_brave else 6)
+    # 熔断/免费回退/硬超时控制
+    import time as _st
+    search_started_at = _st.monotonic()
+    hard_deadline = search_started_at + 300.0      # 整轮 5 分钟硬超时，杜绝十几分钟干等
+    free_mode = _brave_breaker.get("open", False)  # 开局即熔断 → 直接走受限免费回退
+    breaker_event = _brave_breaker.get("reason", "") if free_mode else ""
+    free_queries_used = 0
+    # 免费回退 30 秒总预算起点：开局已熔断则立即起算，运行中熔断时在 except 分支起算
+    free_deadline = (_st.monotonic() + _FREE_FALLBACK_BUDGET_SEC) if free_mode else None
+    search_aborted = False
+
+    def _ingest(query, results):
         if not results:
-            empty_rounds += 1
-        else:
-            empty_rounds = 0
+            return False
         for r in results:
             url = r.get("url", "").lower().strip()
             if url and url not in seen_urls:
                 seen_urls.add(url)
                 r["_query"] = query
                 all_raw.append(r)
+        return True
+
+    for i, query in enumerate(queries[:max_queries]):
+        # 整轮硬超时：立即收工
+        if _st.monotonic() > hard_deadline:
+            search_aborted = True
+            print("[search] 整轮达到5分钟硬超时，提前结束")
+            break
+        try:
+            _lead_search_job["done_queries"] = i + 1
+        except Exception:
+            pass
+        used_queries.append(query)
+        try:
+            if free_mode:
+                # 免费回退：最多 _FREE_FALLBACK_MAX_QUERIES 个词、总预算 30 秒
+                if free_queries_used >= _FREE_FALLBACK_MAX_QUERIES or _st.monotonic() > free_deadline:
+                    search_aborted = True
+                    break
+                results = _search_ddg_leads(query, timeout=6, skip_brave=True, deadline=free_deadline)
+                free_queries_used += 1
+            else:
+                results = _search_ddg_leads(query, timeout=8)
+        except (BraveBillingError, BraveRateLimitError, BraveCircuitOpenError) as be:
+            # 首次欠费/限流/已熔断 → 打开熔断并切免费回退（仅给 3 词 / 30 秒短上限）
+            if isinstance(be, BraveRateLimitError):
+                _trip_brave_breaker("rate_limited", status=429,
+                                    remaining=_brave_breaker.get("remaining"))
+            elif isinstance(be, BraveBillingError):
+                _trip_brave_breaker("billing", status=getattr(be, "status", 402))
+            breaker_event = _brave_breaker.get("reason", "open")
+            free_mode = True
+            free_queries_used = 0
+            free_deadline = _st.monotonic() + _FREE_FALLBACK_BUDGET_SEC
+            print(f"[search] Brave 熔断({type(be).__name__})，切免费回退(≤3词/30秒)")
+            continue
+        if not _ingest(query, results):
+            empty_rounds += 1
+        else:
+            empty_rounds = 0
         if len(all_raw) >= max_results * 2:
             break
-        # 连续多轮零结果（被限流）就提前收工，不浪费时间/额度
         if empty_rounds >= 5:
             break
-        # 轮次间隔：Brave 遵守 1 QPS；免费引擎降低被封概率
-        if i < max_queries - 1:
+        if not free_mode and i < max_queries - 1:
             time.sleep(gap)
 
-    # ===== 深度搜索兜底：首轮结果太少时，用更广泛的关键词补充 =====
-    if len(all_raw) < 5:
+    # ===== 深度搜索兜底：首轮结果太少且未熔断/未超时时，用更广泛关键词补充 =====
+    # 熔断或免费回退模式下不做深搜（省免费引擎请求、避免再拖时间）
+    if len(all_raw) < 5 and not free_mode and not search_aborted \
+            and _st.monotonic() < hard_deadline:
         print(f"[search] 首轮结果不足({len(all_raw)}条)，启动深度搜索补充...")
         deep_search_triggered = True
-        # custom 校准轮：围绕本轮国家/意图扩展；默认轮：用默认深搜词池
         deep_queries = (_build_custom_deep_queries(custom_queries)
                         if custom_queries else _build_deep_search_queries())
         if not deep_queries:
             deep_queries = _build_deep_search_queries()
-        max_deep = min(len(deep_queries), 10 if use_brave else 8)
+        max_deep = min(len(deep_queries), 10)
         for j, dq in enumerate(deep_queries[:max_deep]):
-            results = _search_ddg_leads(dq, timeout=8 if use_brave else 6)
+            if _st.monotonic() > hard_deadline:
+                search_aborted = True
+                break
+            try:
+                results = _search_ddg_leads(dq, timeout=8)
+            except (BraveBillingError, BraveRateLimitError, BraveCircuitOpenError) as be:
+                if isinstance(be, BraveRateLimitError):
+                    _trip_brave_breaker("rate_limited", status=429,
+                                        remaining=_brave_breaker.get("remaining"))
+                elif isinstance(be, BraveBillingError):
+                    _trip_brave_breaker("billing", status=getattr(be, "status", 402))
+                breaker_event = _brave_breaker.get("reason", "open")
+                break
             used_queries.append(dq)
-            for r in results:
-                url = r.get("url", "").lower().strip()
-                if url and url not in seen_urls:
-                    seen_urls.add(url)
-                    r["_query"] = dq
-                    all_raw.append(r)
+            _ingest(dq, results)
             if len(all_raw) >= max_results * 3:
                 break
             if j < max_deep - 1:
@@ -5060,6 +5248,11 @@ def _run_lead_search(max_results: int = 30, custom_queries: Optional[list] = Non
             "empty_rounds": empty_rounds,
             "engine_status": dict(_lead_search_diag["engine_status"]),
             "last_ok_engine": _lead_search_diag["last_ok_engine"],
+            # Brave 熔断/免费回退可观测
+            "brave_tripped": bool(free_mode),
+            "brave_trip_reason": breaker_event or "",
+            "free_fallback_queries": free_queries_used,
+            "search_aborted": bool(search_aborted),
             # P2 丢弃明细：{原因: [{title,url,query}...]}，供落盘与误伤核对
             "drop_samples": {k: v for k, v in _drop_samples.items() if v},
         }
@@ -5073,6 +5266,8 @@ class LeadSearchRequest(BaseModel):
     force_refresh: Optional[bool] = False
     # 仅管理员：显式指定本轮搜索词（轮换国家/产品线/意图词做分布校准），非空时替代默认词池
     queries: Optional[list] = None
+    # 仅管理员：充值后「强制跑一轮」——先复位 Brave 熔断再搜
+    force_run: Optional[bool] = False
 
 
 @app.get("/api/leads/search/status")
@@ -5097,6 +5292,7 @@ async def api_leads_search_status(request: Request):
         "phase": _lead_search_job.get("phase", ""),
         "done_queries": _lead_search_job.get("done_queries", 0),
         "total_queries": _lead_search_job.get("total_queries", 0),
+        "brave_breaker": dict(_brave_breaker),
     }
 
 
@@ -5123,6 +5319,12 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
             cq = [str(q).strip() for q in req.queries if str(q).strip()]
             if cq:
                 custom_queries = cq[:25]  # 上限 25，与默认轮次一致
+        # 充值后强制跑：仅管理员，先复位 Brave 熔断
+        if getattr(req, "force_run", False):
+            if user_info.get("role") != "admin":
+                return JSONResponse({"ok": False, "message": "强制跑一轮仅管理员可用"}, status_code=403)
+            if _brave_breaker.get("open"):
+                reset_brave_breaker()
 
     # 30 秒内已有结果且未强制刷新：直接命中缓存，无需启动后台任务（自定义 query 不走缓存）
     now = time.time()
@@ -5466,7 +5668,13 @@ def _run_lead_search_job(max_results: int = 30, custom_queries: Optional[list] =
                 "engine_status": search_diag.get("engine_status", {}),
                 "last_ok_engine": search_diag.get("last_ok_engine", ""),
                 "empty_rounds": search_diag.get("empty_rounds", 0),
+                # Brave 熔断/免费回退可观测
+                "brave_tripped": search_diag.get("brave_tripped", False),
+                "brave_trip_reason": search_diag.get("brave_trip_reason", ""),
+                "free_fallback_queries": search_diag.get("free_fallback_queries", 0),
+                "search_aborted": search_diag.get("search_aborted", False),
             },
+            "brave_breaker": dict(_brave_breaker),
             "search_time": datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S"),
         }
         # 有送 Coze 的真实主体时，后台评分/补搜仍在跑，先置 finished 供前端展示，
@@ -6655,6 +6863,30 @@ async def api_admin_reset_lead_score(record_id: str, request: Request):
         return JSONResponse({"ok": False, "message": f"归位失败：{e}"}, status_code=502)
 
 
+@app.get("/api/admin/brave-breaker")
+async def api_brave_breaker_status(request: Request):
+    """查看 Brave 熔断状态（仅 admin）。"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info or user_info.get("role") != "admin":
+        return JSONResponse({"ok": False, "message": "需要管理员权限"}, status_code=403)
+    return {"ok": True, "breaker": dict(_brave_breaker),
+            "scheduled_enabled": os.environ.get(
+                "ENABLE_SCHEDULED_SEARCH", "").strip().lower() in ("1", "true", "yes", "on")}
+
+
+@app.post("/api/admin/brave-breaker/reset")
+async def api_brave_breaker_reset(request: Request):
+    """人工复位 Brave 熔断（充值后点「强制跑一轮」前调用，仅 admin）。"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info or user_info.get("role") != "admin":
+        return JSONResponse({"ok": False, "message": "需要管理员权限"}, status_code=403)
+    before = dict(_brave_breaker)
+    reset_brave_breaker()
+    return {"ok": True, "before": before, "after": dict(_brave_breaker)}
+
+
 @app.post("/api/leads/{record_id}/enrich")
 async def api_leads_enrich(record_id: str, req: Optional[EnrichLeadRequest] = None, request: Request = None):
     """手动触发单条线索补全信息。depth: light=轻补搜, deep=深度补搜。需JWT认证。"""
@@ -6760,8 +6992,16 @@ async def api_leads_enrich(record_id: str, req: Optional[EnrichLeadRequest] = No
 
 
 async def _scheduled_leads_search():
-    """定时任务：每天9:00/15:00自动搜索线索并写入公海池，后台启动补搜"""
-    print(f"[scheduler] 定时搜索开始: {datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')}")
+    """定时任务（维持性覆盖，默认关闭→纯手动；设环境变量 LEADS_SCHEDULED_SEARCH=1 开启）。
+    Brave 熔断打开时自动跳过，避免额度到顶后空跑/烧免费引擎。"""
+    now_h = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')
+    if os.environ.get("ENABLE_SCHEDULED_SEARCH", "").strip().lower() not in ("1", "true", "yes", "on"):
+        print(f"[scheduler] {now_h} 定时搜索已关闭（纯手动模式，点「搜索新线索」触发）")
+        return
+    if _brave_breaker.get("open"):
+        print(f"[scheduler] {now_h} Brave 熔断中（{_brave_breaker.get('reason')}），定时搜索自动跳过")
+        return
+    print(f"[scheduler] 定时搜索开始: {now_h}")
     try:
         raw_leads = await asyncio.to_thread(_run_lead_search, 30)
         try:
@@ -6850,16 +7090,16 @@ async def startup_scheduler():
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
         from apscheduler.triggers.cron import CronTrigger
         scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
-        # 主动获客改为「人工点击才搜索」：默认不挂定时任务。
-        # 需要恢复每日 09:00/15:00 自动搜索时，在环境变量设置 ENABLE_SCHEDULED_SEARCH=true。
+        # 主动获客默认「纯手动」：点「搜索新线索」才跑，不挂定时（省 Brave 额度）。
+        # 如需恢复"维持性覆盖"自动搜索：设 ENABLE_SCHEDULED_SEARCH=true → 每天凌晨 03:00 低峰跑 1 次；
+        # 且 Brave 熔断打开时该任务会自动跳过。
         if os.environ.get("ENABLE_SCHEDULED_SEARCH", "").strip().lower() in ("1", "true", "yes", "on"):
-            scheduler.add_job(_scheduled_leads_search, CronTrigger(hour=9, minute=0), id="leads_search_9am")
-            scheduler.add_job(_scheduled_leads_search, CronTrigger(hour=15, minute=0), id="leads_search_3pm")
+            scheduler.add_job(_scheduled_leads_search, CronTrigger(hour=3, minute=0), id="leads_search_3am")
             scheduler.start()
-            print("[scheduler] APScheduler 已启动，定时主动搜索: 每天 09:00 / 15:00 北京时间")
+            print("[scheduler] APScheduler 已启动，定时主动搜索: 每天 03:00 北京时间（维持性覆盖）")
         else:
             scheduler.start()
-            print("[scheduler] 定时主动搜索已关闭（仅人工点击「搜索新线索」触发）；如需恢复设 ENABLE_SCHEDULED_SEARCH=true")
+            print("[scheduler] 定时主动搜索已关闭·纯手动（点「搜索新线索」触发）；恢复设 ENABLE_SCHEDULED_SEARCH=true")
     except Exception as e:
         print(f"[scheduler] APScheduler 启动失败: {e}")
     # 启动后静默校正"可达性闸门"上线前的历史虚高评分（幂等，只跑一次）
