@@ -4675,11 +4675,16 @@ def _build_deep_search_queries():
     return extra
 
 
+class _DiagList(list):
+    """list 子类：行为与普通 list 完全一致（append/sort/切片/len 皆可用），
+    但额外允许挂自定义属性。内置 list 无 __dict__，不能直接 leads._search_diag=...。"""
+
+
 def _run_lead_search(max_results: int = 30, custom_queries: Optional[list] = None) -> list:
     """执行主动搜索核心逻辑，返回结构化线索列表。
     custom_queries：管理员显式指定的原始搜索词（用于轮换国家/产品线/意图词做分布校准），
     非空时完全替代默认 query 池（仍统一追加竞品/二手负词）。
-    诊断计数挂在返回列表对象的 _search_diag 属性上（列表可挂自定义属性）。"""
+    诊断计数挂在返回列表对象的 _search_diag 属性上（_DiagList 支持自定义属性）。"""
     queries = _build_search_queries(custom_queries=custom_queries)
     all_raw = []  # [{title, url, snippet}]
     used_queries = []  # 实际执行过的 query（逐个 append，真实反映轮次；不按配额预填）
@@ -4776,8 +4781,8 @@ def _run_lead_search(max_results: int = 30, custom_queries: Optional[list] = Non
         print(f"[search] 内部去重: 原始{raw_count_total}条 → 去重后{len(_deduped_raw)}条（丢弃{_internal_dedup_drop}条重复公司名）")
     all_raw = _deduped_raw
 
-    # 提取公司信息
-    leads = []
+    # 提取公司信息（用 _DiagList，末尾挂 _search_diag 诊断属性）
+    leads = _DiagList()
     seen_companies = set()
     dirty_dropped = 0  # 脏公司名（搜索词短语）被过滤的条数
     seller_dropped = 0  # 同行卖家货架页/经销商栏目页被过滤的条数
@@ -4904,8 +4909,8 @@ def _run_lead_search(max_results: int = 30, custom_queries: Optional[list] = Non
             "engine_status": dict(_lead_search_diag["engine_status"]),
             "last_ok_engine": _lead_search_diag["last_ok_engine"],
         }
-    except Exception:
-        pass
+    except Exception as _diag_e:
+        print(f"[search] 诊断信息挂载失败（不影响线索结果）: {_diag_e}")
     return leads
 
 
