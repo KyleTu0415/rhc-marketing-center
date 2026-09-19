@@ -5286,6 +5286,13 @@ async def api_leads_search_status(request: Request):
     if st == "error":
         return {"ok": False, "status": "error",
                 "message": _lead_search_job.get("error") or "搜索失败，请稍后重试"}
+    # 只有真正在执行（含后台评分/补搜）才报 running；初始/空闲态必须回 idle，
+    # 否则重启后 status=idle 会被误报成 running，前端永久转圈且「搜索新线索」按钮置灰。
+    if not (_lead_search_job.get("running") or _search_in_progress):
+        return {"ok": True, "status": "idle",
+                "searching": False, "phase": "",
+                "done_queries": 0, "total_queries": 0,
+                "brave_breaker": dict(_brave_breaker)}
     return {
         "ok": True, "status": "running",
         "searching": _lead_search_job.get("searching", True),

@@ -3631,6 +3631,10 @@ function searchNewLeads() {
               clearInterval(timer); resetBtn();
               showFail('搜索仍在进行','本轮搜索耗时较长，仍在后台继续；请稍等 1 分钟后再点「搜索新线索」查看结果。');
             }
+          }else if(st.status==='idle'){
+            // 后端空闲（多为发版重启清空了任务态）：停止转圈，允许重新点
+            clearInterval(timer); resetBtn();
+            showFail('搜索已重置','服务刚完成更新或本轮任务已清空，请再点一次「搜索新线索」。');
           }
         })
         .catch(function(){ /* 单次轮询失败不致命，下一轮继续 */ });
