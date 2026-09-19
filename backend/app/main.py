@@ -3942,9 +3942,15 @@ def backfill_lead_grades(apply: bool = False) -> dict:
         if cur == want:
             skipped += 1
             continue
+        # _fetch_leads 返回归一化短键（见 LEADS_FIELD_MAP）：公司机构/认领人/认领状态
+        _claimer = (ld.get("认领人") or "").strip()
+        _claim_st = (ld.get("认领状态") or "").strip()
         changes.append({"record_id": rid,
-                        "company": (ld.get("公司/机构") or "")[:40],
-                        "score": score, "old_grade": cur or "(空)", "new_grade": want})
+                        "company": (ld.get("公司机构") or ld.get("标题") or "")[:40],
+                        "score": score, "old_grade": cur or "(空)", "new_grade": want,
+                        "claimed": bool(_claimer) or "已认领" in _claim_st,
+                        "claimer": _claimer,
+                        "url": (ld.get("原文链接") or "")[:80]})
         if apply:
             try:
                 _update_leads_record(rid, {"评级": want})
