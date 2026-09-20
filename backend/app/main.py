@@ -6345,7 +6345,7 @@ def _resend_send_mail(to_addrs, subject, body, cc, api_key) -> str:
     try:
         with _ur.urlopen(req, timeout=20) as r:
             resp = _json.loads(r.read().decode("utf-8", "ignore") or "{}")
-    except urllib.error.HTTPError as e:
+    except _ue.HTTPError as e:
         detail = ""
         try:
             detail = e.read().decode("utf-8", "ignore")[:300]
