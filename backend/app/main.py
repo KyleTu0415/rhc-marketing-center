@@ -89,7 +89,7 @@ except ImportError:
         openai_base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
         openai_text_model: str = os.getenv("OPENAI_TEXT_MODEL", "deepseek-chat")
         smtp_host: str = os.getenv("SMTP_HOST", "smtp.exmail.qq.com")
-        smtp_port: int = int(os.getenv("SMTP_PORT", "465"))
+        smtp_port: int = int(os.getenv("SMTP_PORT", "587"))
         smtp_user: str = os.getenv("SMTP_USER", "ellachen@rhcmed.com")
         smtp_password: str = os.getenv("SMTP_PASSWORD", "h4zJZ47A688cW6t9")
         smtp_from_name: str = os.getenv("SMTP_FROM_NAME", "RHC Veterinary Medical")
@@ -6253,9 +6253,9 @@ def _smtp_send_mail(to_addrs, subject, body, cc=None,
     smtp_password = (sender_password or "").strip() or _settings_val("smtp_password", "")
     smtp_host = _settings_val("smtp_host", "smtp.exmail.qq.com")
     try:
-        smtp_port = int(_settings_val("smtp_port", "465") or 465)
+        smtp_port = int(_settings_val("smtp_port", "587") or 587)
     except (TypeError, ValueError):
-        smtp_port = 465
+        smtp_port = 587
     smtp_from_name = _settings_val("smtp_from_name", "RHC Veterinary Medical")
     if not smtp_user or not smtp_password:
         raise RuntimeError("发件邮箱未配置（缺少 SMTP_USER 或 SMTP_PASSWORD/客户端授权码）")
