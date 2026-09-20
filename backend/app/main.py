@@ -7349,6 +7349,33 @@ async def _favicon():
     return Response(status_code=204)
 
 
+class BatchExclusionRequest(BaseModel):
+    items: list  # [{"rid": "recxxx", "reason": "junk:low_score"}, ...]
+
+@app.post("/api/admin/batch-exclusion")
+async def api_batch_exclusion(req: BatchExclusionRequest, request: Request):
+    """批量写入系统排除字段（用于公海池规则打标）"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info:
+        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    updated, errors = 0, 0
+    for item in req.items:
+        rid = item.get("rid", "")
+        reason = item.get("reason", "")
+        if not rid or not reason:
+            continue
+        try:
+            _update_leads_record(rid, {"系统排除": reason})
+            updated += 1
+        except Exception as e:
+            errors += 1
+            print(f"[batch-exclusion] 更新失败 {rid}: {e}")
+        import time; time.sleep(0.1)  # 限流
+    _invalidate_leads_cache()
+    return {"ok": True, "updated": updated, "errors": errors, "total": len(req.items)}
+
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
