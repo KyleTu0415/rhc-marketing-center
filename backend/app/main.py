@@ -715,6 +715,7 @@ LEADS_FIELD_MAP = {
     "页面类型": "页面类型",
     "买家类型": "买家类型",
     "系统排除": "系统排除",
+    "市场优先级": "市场优先级",
 }
 LEAD_ACTIVE_STATUS = ("跟进中", "已转客户")
 LEAD_STATUS_OPTIONS = ("跟进中", "已转客户", "已释放")
@@ -2664,6 +2665,55 @@ _SEARCH_COUNTRIES = {
     "Thailand": "东南亚", "Vietnam": "东南亚", "Philippines": "东南亚",
     "Indonesia": "东南亚", "Malaysia": "东南亚", "Myanmar": "东南亚",
 }
+
+# ============================================================
+# 市场优先级映射（IT 2026-09-20：评分维度解耦）
+# P0：核心目标市场（4 大区 23 国）
+# P1：成熟市场（澳新加美日韩 + 中东富裕国）
+# P2：其他市场
+# ============================================================
+_MARKET_PRIORITY_P0 = {
+    # 非洲（10）
+    "South Africa", "Kenya", "Tanzania", "Ghana", "Nigeria",
+    "Egypt", "Ethiopia", "Uganda", "Morocco", "Senegal",
+    # 东南亚（6）
+    "Thailand", "Vietnam", "Indonesia", "Philippines", "Malaysia", "Myanmar",
+    # 南亚（4）
+    "India", "Pakistan", "Bangladesh", "Sri Lanka",
+    # 中东（3）
+    "UAE", "Saudi Arabia", "Turkey",
+}
+_MARKET_PRIORITY_P1 = {
+    # 大洋洲
+    "Australia", "New Zealand",
+    # 北美
+    "Canada", "United States",
+    # 东亚
+    "Japan", "South Korea",
+    # 中东富裕国
+    "Qatar", "Kuwait", "Oman",
+}
+
+
+def _get_market_priority(country: str) -> str:
+    """根据国家名称返回市场优先级 P0 / P1 / P2。
+    country 可以是英文国家名（如 'South Africa'）或中文区域-国家格式（如 '非洲 - South Africa'）。"""
+    if not country:
+        return "P2"
+    # 处理 "区域 - 国家" 格式
+    c = country.strip()
+    if " - " in c:
+        c = c.split(" - ", 1)[1].strip()
+    # 标准化别名
+    aliases = {"UK": "United Kingdom", "USA": "United States", "US": "United States"}
+    c = aliases.get(c, c)
+    if c in _MARKET_PRIORITY_P0:
+        return "P0"
+    if c in _MARKET_PRIORITY_P1:
+        return "P1"
+    return "P2"
+
+
 _RHC_PRODUCTS = [
     "RHC-V500 兽用麻醉机", "RHC-V300 兽用呼吸机",
     "RHC-IP600 兽用注射泵", "RHC-PM800 兽用监护仪",
@@ -7031,6 +7081,9 @@ async def api_leads_enrich(record_id: str, req: Optional[EnrichLeadRequest] = No
                 _ex = _ai_exclude_reason(page_type, buyer_type)
                 if _ex:
                     update_fields["系统排除"] = _ex
+                # 更新市场优先级
+                _country = enriched.get("country") or _tv(fields.get("地区", ""))
+                update_fields["市场优先级"] = _get_market_priority(_country)
             _update_leads_record(record_id, update_fields)
             _invalidate_leads_cache()
             return {"ok": True, "message": "轻补搜完成", "data": enriched, "new_score": new_score,
@@ -7084,6 +7137,9 @@ async def api_leads_enrich(record_id: str, req: Optional[EnrichLeadRequest] = No
                     _ex = _ai_exclude_reason(page_type, buyer_type)
                     if _ex:
                         update_fields["系统排除"] = _ex
+                    # 更新市场优先级
+                    _country = deep.get("country") or _tv(fields.get("地区", ""))
+                    update_fields["市场优先级"] = _get_market_priority(_country)
                 except Exception as e2:
                     print(f"[enrich] 深度补搜重评分失败 ({record_id}): {e2}")
             _update_leads_record(record_id, update_fields)
@@ -7168,6 +7224,7 @@ async def _scheduled_leads_search():
                 "电话": lead.get("phone", "") or "",
                 "页面类型": page_type or "unknown",
                 "买家类型": buyer_type or "unknown",
+                "市场优先级": _get_market_priority(lead.get("country", "")),
             }
             _ex = _ai_exclude_reason(page_type, buyer_type)
             if _ex:
@@ -7366,7 +7423,35 @@ async def api_batch_exclusion(req: BatchExclusionRequest, request: Request):
     return {"ok": True, "updated": updated, "errors": errors, "total": len(req.items)}
 
 
-@app.post("/api/admin/batch-region")
+@app.post("/api/admin/backfill-market-priority")
+async def api_backfill_market_priority(request: Request):
+    """批量回填所有线索的市场优先级字段（P0/P1/P2），基于地区字段中的国家名计算"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info:
+        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    leads = _fetch_leads(force_refresh=True)
+    updated, skipped, errors = 0, 0, 0
+    for ld in leads:
+        rid = ld.get("record_id") or ld.get("_record_id") or ""
+        if not rid:
+            skipped += 1
+            continue
+        region = (ld.get("地区") or "").strip()
+        current_mp = (ld.get("市场优先级") or "").strip()
+        want_mp = _get_market_priority(region)
+        if current_mp == want_mp:
+            skipped += 1
+            continue
+        try:
+            _update_leads_record(rid, {"市场优先级": want_mp})
+            updated += 1
+        except Exception as e:
+            errors += 1
+            print(f"[backfill-market-priority] 更新失败 {rid}: {e}")
+        import time; time.sleep(0.1)  # 限流
+    _invalidate_leads_cache()
+    return {"ok": True, "updated": updated, "skipped": skipped, "errors": errors, "total": len(leads)}@app.post("/api/admin/batch-region")
 async def api_batch_region(req: BatchRegionRequest, request: Request):
     """批量更新线索地区字段（用于修复TLD映射缺失）"""
     token = _get_token_from_request(request)
