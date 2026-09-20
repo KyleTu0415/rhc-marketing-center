@@ -991,6 +991,10 @@ def _norm_lead_record(rec: dict) -> dict:
     out = {"record_id": rec.get("record_id", "")}
     for short, full in LEADS_FIELD_MAP.items():
         out[short] = _tv(fl.get(full))
+    # 市场优先级：优先读 bitable 字段值，否则从地区字段实时计算
+    mp = out.get("市场优先级", "")
+    if not mp or mp not in ("P0", "P1", "P2"):
+        out["市场优先级"] = _get_market_priority(out.get("地区", ""))
     return out
 
 
