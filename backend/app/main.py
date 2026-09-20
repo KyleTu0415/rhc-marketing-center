@@ -7469,7 +7469,85 @@ async def api_backfill_market_priority(request: Request):
             print(f"[backfill-market-priority] 更新失败 {rid}: {e}")
         import time; time.sleep(0.1)  # 限流
     _invalidate_leads_cache()
-    return {"ok": True, "updated": updated, "skipped": skipped, "errors": errors, "total": len(leads)}@app.post("/api/admin/batch-region")
+    return {"ok": True, "updated": updated, "skipped": skipped, "errors": errors, "total": len(leads)}
+
+
+@app.post("/api/admin/leads/batch-rescore")
+async def api_admin_batch_rescore(request: Request):
+    """批量重跑Coze打分工作流，更新所有线索的综合评分/页面类型/买家类型。
+    用于Coze Prompt评分规则更新后，让存量线索也按新规则重算。
+    body {"apply": false} 默认干跑返回差异；{"apply": true} 才写库。
+    可选 {"record_ids": ["recxxx", ...]} 只跑指定线索。"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info or user_info.get("role") != "admin":
+        return JSONResponse({"ok": False, "message": "需要管理员权限"}, status_code=403)
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    apply = bool(body.get("apply", False))
+    target_ids = body.get("record_ids", None)  # None = 全部
+
+    leads = _fetch_leads(force_refresh=True)
+    if target_ids:
+        leads = [ld for ld in leads if (ld.get("record_id") or ld.get("_record_id", "")) in target_ids]
+
+    updated, skipped, errors, details = 0, 0, 0, []
+    for ld in leads:
+        rid = ld.get("record_id") or ld.get("_record_id") or ""
+        if not rid:
+            skipped += 1
+            continue
+        try:
+            score, page_type, buyer_type = await call_coze_scoring_workflow(ld)
+            old_score = ld.get("综合评分", 0) or 0
+            old_pt = ld.get("页面类型", "") or ""
+            old_bt = ld.get("买家类型", "") or ""
+            grade = _grade_from_score(score)
+            changes = []
+            if score != old_score:
+                changes.append(f"评分 {old_score}→{score}")
+            if page_type and page_type != old_pt:
+                changes.append(f"页面类型 {old_pt}→{page_type}")
+            if buyer_type and buyer_type != old_bt:
+                changes.append(f"买家类型 {old_bt}→{buyer_type}")
+
+            if apply and changes:
+                update_fields = {"综合评分": score, "评级": grade}
+                if page_type:
+                    update_fields["页面类型"] = page_type
+                if buyer_type:
+                    update_fields["买家类型"] = buyer_type
+                _update_leads_record(rid, update_fields)
+                updated += 1
+                details.append({"record_id": rid, "company": ld.get("公司/机构", ""), "changes": changes})
+            elif changes:
+                details.append({"record_id": rid, "company": ld.get("公司/机构", ""), "changes": changes, "dry_run": True})
+                skipped += 1
+            else:
+                skipped += 1
+        except Exception as e:
+            errors += 1
+            details.append({"record_id": rid, "company": ld.get("公司/机构", ""), "error": str(e)})
+            print(f"[batch-rescore] 打分失败 {rid}: {e}")
+        import time; time.sleep(1)  # Coze API限流
+
+    if apply:
+        _invalidate_leads_cache()
+    return {
+        "ok": True,
+        "apply": apply,
+        "total": len(leads),
+        "updated": updated,
+        "skipped": skipped,
+        "errors": errors,
+        "details": details[:50],  # 最多返回50条明细
+    }
+
+
+@app.post("/api/admin/batch-region")
 async def api_batch_region(req: BatchRegionRequest, request: Request):
     """批量更新线索地区字段（用于修复TLD映射缺失）"""
     token = _get_token_from_request(request)
