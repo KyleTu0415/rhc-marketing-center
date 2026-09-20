@@ -554,6 +554,7 @@ function showAntibotGuide(opts){
         <div style="display:flex;align-items:center;gap:12px">
           <span class="card-sub" id="search-results-count"></span>
           <button class="btn btn-primary btn-sm" id="search-new-btn" onclick="searchNewLeads()"> 搜索新线索</button>
+          <button class="btn btn-sm" id="reset-search-btn" onclick="resetSearchState()" style="font-size:12px;padding:4px 10px;opacity:0.7"> 重置</button>
         </div>
       </div>
       <div class="card-body">
@@ -3534,6 +3535,17 @@ function updateMcBadge(){
 }
 
 /* ===== Search New Leads ===== */
+function resetSearchState() {
+  if (!confirm('确认重置搜索状态？将清除当前搜索进度。')) return;
+  fetch('/api/admin/leads/reset-search', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + token }
+  }).then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok) { showFail('已重置', '搜索状态已清除，请重新点击「搜索新线索」。'); }
+      else { showFail('重置失败', d.message || '未知错误'); }
+    }).catch(function() { showFail('重置失败', '网络错误，请稍后重试'); });
+}
 function searchNewLeads() {
   var btn = document.getElementById('search-new-btn');
   // 防止重复点击：按钮已禁用时直接返回

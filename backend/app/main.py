@@ -5444,6 +5444,25 @@ async def api_leads_search_status(request: Request):
     }
 
 
+@app.post("/api/admin/leads/reset-search")
+async def api_admin_reset_search(request: Request):
+    """管理员强制重置搜索状态（清除卡死的搜索锁）。需登录。"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info:
+        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    global _search_in_progress, _lead_search_job, _search_results_cache, _search_round
+    _search_in_progress = False
+    _search_round += 1
+    _lead_search_job = {
+        "running": False, "searching": False, "status": "idle",
+        "phase": "", "done_queries": 0, "total_queries": 0,
+        "result": None, "error": "", "ts": 0.0,
+    }
+    _search_results_cache = {"ts": 0.0, "data": None, "query": "", "total": 0}
+    return {"ok": True, "message": "搜索状态已重置，可以重新搜索"}
+
+
 @app.post("/api/leads/search")
 async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = None):
     """AI主动搜索：立即在后台启动全网搜索任务并返回（不阻塞，避免长请求被网关掐断）。
