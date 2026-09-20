@@ -1054,6 +1054,7 @@ class LeadUpdateRequest(BaseModel):
     status: Optional[str] = None
     note: Optional[str] = None
     email_source: Optional[str] = None
+    exclusion: Optional[str] = None
 
 
 class LeadFindEmailRequest(BaseModel):
@@ -1157,6 +1158,8 @@ async def api_leads_update(record_id: str, req: LeadUpdateRequest, request: Requ
                 return JSONResponse({"ok": False, "message": f"状态仅支持：{'/'.join(LEAD_STATUS_OPTIONS)}"},
                                     status_code=400)
             fields["状态"] = status
+        if req.exclusion is not None:
+            fields["系统排除"] = req.exclusion.strip()
         if not fields:
             return {"ok": True, "message": "无需要更新的内容"}
         _feishu_api(
