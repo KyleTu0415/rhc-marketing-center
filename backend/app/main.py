@@ -2689,12 +2689,10 @@ _MARKET_PRIORITY_P0 = {
     "Egypt", "Ethiopia", "Uganda", "Morocco", "Senegal",
     # 东南亚（6）
     "Thailand", "Vietnam", "Indonesia", "Philippines", "Malaysia", "Myanmar",
-    # 南亚（4）
-    "India", "Pakistan", "Bangladesh", "Sri Lanka",
-    # 中东（3）
-    "UAE", "Saudi Arabia", "Turkey",
     # 欧洲（7）
     "Germany", "France", "United Kingdom", "Spain", "Italy", "Poland", "Netherlands",
+    # 南美（4）
+    "Brazil", "Argentina", "Colombia", "Chile",
 }
 _MARKET_PRIORITY_P1 = {
     # 大洋洲
@@ -2703,7 +2701,8 @@ _MARKET_PRIORITY_P1 = {
     "Canada", "United States",
     # 东亚
     "Japan", "South Korea",
-    # 中东富裕国
+    # 中东
+    "United Arab Emirates", "Saudi Arabia", "Turkey",
     "Qatar", "Kuwait", "Oman",
 }
 
@@ -2721,7 +2720,10 @@ def _get_market_priority(country: str) -> str:
     if not c or c in ("未知", "unknown", ""):
         return "待识别"
     # 标准化别名
-    aliases = {"UK": "United Kingdom", "USA": "United States", "US": "United States"}
+    aliases = {
+        "UK": "United Kingdom", "USA": "United States", "US": "United States",
+        "UAE": "United Arab Emirates", "South Korea": "South Korea", "Korea": "South Korea",
+    }
     c = aliases.get(c, c)
     if c in _MARKET_PRIORITY_P0:
         return "P0"
