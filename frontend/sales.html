@@ -2913,7 +2913,7 @@ function loadPublicPool(forceRefresh, _retryAttempt){
             var cb=l['认领人']||l.claimer||l.claimed_by||'';
             if(cs==='已认领'||cb)claimed.push(l);else unclaimed.push(l);
           }
-          unclaimed.sort(function(a,b){return (parseInt(b.score||b['综合评分']||0,10))-(parseInt(a.score||a['综合评分']||0,10))});
+          unclaimed.sort(function(a,b){return _sortByPriorityThenScore(a,b)});
           publicPoolLeads=claimed.concat(unclaimed);
         })();
       publicPoolLoaded=true;
@@ -2941,6 +2941,20 @@ function loadPublicPool(forceRefresh, _retryAttempt){
       }
       if(stats)stats.textContent='';
     });
+}
+
+/* 市场优先级排序辅助函数：P0>P1>P2>待识别，同级按评分降序 */
+function _mpOrder(mp){
+  if(mp==='P0')return 0;
+  if(mp==='P1')return 1;
+  if(mp==='P2')return 2;
+  return 3; /* 待识别 或 空值排最后 */
+}
+function _sortByPriorityThenScore(a,b){
+  var ma=_mpOrder(a['市场优先级']||a.market_priority||'');
+  var mb=_mpOrder(b['市场优先级']||b.market_priority||'');
+  if(ma!==mb)return ma-mb;
+  return (parseInt(b.score||b['综合评分']||0,10))-(parseInt(a.score||a['综合评分']||0,10));
 }
 
 /* ===== 线索字段统一取值（中英文双兜底，v2.1） ===== */
@@ -3115,7 +3129,7 @@ function renderLeadCard(ld,scope){
 }
 
 /* 公海池筛选（纯前端）：time=all/today/week，grade=all/A/B/C */
-var poolFilter={time:'all',grade:'all'};
+var poolFilter={time:'all',grade:'all',priority:'all'};
 function _poolDate(s){
   if(!s)return null;
   var m=String(s).trim().match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[ T](\d{1,2}):(\d{1,2}))?/);
@@ -3148,7 +3162,9 @@ function renderPoolFilters(){
   box.innerHTML=
     seg('入池时间','time',[{v:'all',t:'全部'},{v:'today',t:'今日新入池'},{v:'week',t:'近7天'}])+
     '<span style="width:1px;height:16px;background:#eee"></span>'+
-    seg('评级','grade',[{v:'all',t:'全部'},{v:'A',t:'A级'},{v:'B',t:'B级'},{v:'C',t:'C级'}]);
+    seg('评级','grade',[{v:'all',t:'全部'},{v:'A',t:'A级'},{v:'B',t:'B级'},{v:'C',t:'C级'}])+
+    '<span style="width:1px;height:16px;background:#eee"></span>'+
+    seg('市场优先级','priority',[{v:'all',t:'全部'},{v:'P0',t:'P0 重点'},{v:'P1',t:'P1 成熟'},{v:'P2',t:'P2 其他'},{v:'待识别',t:'待识别'}]);
   box.querySelectorAll('button[data-pf]').forEach(function(b){
     b.onclick=function(){poolFilter[b.getAttribute('data-pf')]=b.getAttribute('data-v');renderPublicPool();};
   });
@@ -3161,6 +3177,10 @@ function applyPoolFilters(leads){
       var g=String(n.grade||'').trim().toUpperCase().charAt(0);
       if(g!==poolFilter.grade)return false;
     }
+    if(poolFilter.priority!=='all'){
+      var mp=ld['市场优先级']||ld.market_priority||'';
+      if(mp!==poolFilter.priority)return false;
+    }
     return true;
   });
 }
@@ -3171,10 +3191,10 @@ function renderPublicPool(){
   renderPoolFilters();
   var claimerName=getClaimerName();
   var filtered=applyPoolFilters(publicPoolLeads);
-  var filtering=(poolFilter.time!=='all'||poolFilter.grade!=='all');
+  var filtering=(poolFilter.time!=='all'||poolFilter.grade!=='all'||poolFilter.priority!=='all');
   if(stats)stats.textContent=filtering
     ?('筛选后 '+filtered.length+' / 共 '+publicPoolLeads.length+' 条公海线索')
-    :('共 '+publicPoolLeads.length+' 条公海线索 · 按综合评分降序排列');
+    :('共 '+publicPoolLeads.length+' 条公海线索 · P0优先 → 质量分降序');
   if(!publicPoolLeads.length){
     el.innerHTML='<div class="empty-state"><div class="es-icon">'+SIGNAL_ICON_RSS+'</div><div class="es-title">暂无可认领的商机</div><div class="es-desc">点击「搜索新线索」，系统将实时全网检索南美/非洲/欧洲/东南亚的兽用器械买家。新线索搜索完成后即进入公海池，可在下方「今日新入池」中快速查看。</div></div>';
     return;
@@ -3373,7 +3393,7 @@ function startEnrichmentPolling(){
             var cb=l['认领人']||l.claimer||l.claimed_by||'';
             if(cs==='已认领'||cb)claimed.push(l);else unclaimed.push(l);
           }
-          unclaimed.sort(function(a,b){return (parseInt(b.score||b['综合评分']||0,10))-(parseInt(a.score||a['综合评分']||0,10))});
+          unclaimed.sort(function(a,b){return _sortByPriorityThenScore(a,b)});
           publicPoolLeads=claimed.concat(unclaimed);
         })();
         publicPoolCache={items:publicPoolLeads.slice(),timestamp:Date.now()};
