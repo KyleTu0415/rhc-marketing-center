@@ -1055,6 +1055,7 @@ class LeadUpdateRequest(BaseModel):
     note: Optional[str] = None
     email_source: Optional[str] = None
     exclusion: Optional[str] = None
+    region: Optional[str] = None
 
 
 class LeadFindEmailRequest(BaseModel):
@@ -1160,6 +1161,8 @@ async def api_leads_update(record_id: str, req: LeadUpdateRequest, request: Requ
             fields["状态"] = status
         if req.exclusion is not None:
             fields["系统排除"] = req.exclusion.strip()
+        if req.region is not None:
+            fields["地区"] = req.region.strip()
         if not fields:
             return {"ok": True, "message": "无需要更新的内容"}
         _feishu_api(
@@ -7325,25 +7328,12 @@ async def api_cleanup_all_leads(request: Request):
     return JSONResponse({"ok": False, "message": "未知 action"}, status_code=400)
 
 
-# Serve frontend - try multiple possible locations
-_candidate_dirs = [
-    os.path.join(os.path.dirname(__file__), "frontend"),                              # Railway root=backend/: /app/frontend
-    os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend"),              # Railway root=repo: /backend/frontend
-    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "frontend"),  # extra fallback
-]
-static_dir = None
-for _d in _candidate_dirs:
-    if os.path.isdir(_d):
-        static_dir = _d
-        break
-# Serve generated uploads (transparent PNGs etc.) as static files
-_uploads_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
-os.makedirs(_uploads_dir, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=_uploads_dir), name="uploads")
 
-if static_dir:
-    app.mount("/", StaticFiles(directory=static_dir, html=True), name="frontend")
+class BatchExclusionRequest(BaseModel):
+    items: list  # [{"rid": "recxxx", "reason": "junk:low_score"}, ...]
 
+class BatchRegionRequest(BaseModel):
+    items: list  # [{"rid": "recxxx", "region": "非洲 - South Africa"}, ...]
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def _favicon():
@@ -7351,9 +7341,6 @@ async def _favicon():
     from fastapi.responses import Response
     return Response(status_code=204)
 
-
-class BatchExclusionRequest(BaseModel):
-    items: list  # [{"rid": "recxxx", "reason": "junk:low_score"}, ...]
 
 @app.post("/api/admin/batch-exclusion")
 async def api_batch_exclusion(req: BatchExclusionRequest, request: Request):
@@ -7377,6 +7364,51 @@ async def api_batch_exclusion(req: BatchExclusionRequest, request: Request):
         import time; time.sleep(0.1)  # 限流
     _invalidate_leads_cache()
     return {"ok": True, "updated": updated, "errors": errors, "total": len(req.items)}
+
+
+@app.post("/api/admin/batch-region")
+async def api_batch_region(req: BatchRegionRequest, request: Request):
+    """批量更新线索地区字段（用于修复TLD映射缺失）"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info:
+        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    updated, errors = 0, 0
+    for item in req.items:
+        rid = item.get("rid", "")
+        region = item.get("region", "")
+        if not rid or not region:
+            continue
+        try:
+            _update_leads_record(rid, {"地区": region})
+            updated += 1
+        except Exception as e:
+            errors += 1
+            print(f"[batch-region] 更新失败 {rid}: {e}")
+        import time; time.sleep(0.1)  # 限流
+    _invalidate_leads_cache()
+    return {"ok": True, "updated": updated, "errors": errors, "total": len(req.items)}
+
+
+# Serve frontend - try multiple possible locations
+_candidate_dirs = [
+    os.path.join(os.path.dirname(__file__), "frontend"),                              # Railway root=backend/: /app/frontend
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend"),              # Railway root=repo: /backend/frontend
+    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "frontend"),  # extra fallback
+]
+static_dir = None
+for _d in _candidate_dirs:
+    if os.path.isdir(_d):
+        static_dir = _d
+        break
+# Serve generated uploads (transparent PNGs etc.) as static files
+_uploads_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
+os.makedirs(_uploads_dir, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=_uploads_dir), name="uploads")
+
+if static_dir:
+    app.mount("/", StaticFiles(directory=static_dir, html=True), name="frontend")
+
 
 
 if __name__ == "__main__":
