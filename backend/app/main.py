@@ -1622,7 +1622,8 @@ def _abs_url(base: str, link: str) -> str:
 
 
 def _crawl_official_site(host: str, deadline: float) -> list:
-    """抓官网首页 + 首页中 contact/about 链接（每域名最多 3 页），返回 [{url, html}]。"""
+    """抓官网首页 + 首页中联系/关于链接（每域名最多 5 页），返回 [{url, html}]。
+    支持多语言联系页路径（/kontakt, /contatti, /contacto 等）及导航中发现的更多联系页。"""
     pages = []
     if time.time() > deadline:
         return pages
@@ -1644,14 +1645,13 @@ def _crawl_official_site(host: str, deadline: float) -> list:
     pages.append({"url": home, "html": home_html})
     if time.time() > deadline:
         return pages
-    # 从首页提取 contact / about 链接
+    # 从首页提取联系/关于链接（支持多语言）
     sub_links = []
     seen = {pages[0]["url"]}
     for m in re.finditer(r'href=["\']([^"\']+)["\']', pages[0]["html"], re.I):
         link = m.group(1).strip()
         low = link.lower()
-        if not ("/contact" in low or "contact-" in low or "/about" in low
-                or "about-" in low or "contactus" in low):
+        if not re.search(r'(/contact|contact-|/about|about-|contactus|/kontakt|/contatti|/contacto|/contactez-nous|get-in-touch|reach-us|/imprint|/impressum)', low):
             continue
         if low.startswith(("mailto:", "tel:", "javascript:", "#")):
             continue
@@ -1664,7 +1664,7 @@ def _crawl_official_site(host: str, deadline: float) -> list:
             continue
         seen.add(absu.rstrip("/"))
         sub_links.append(absu)
-        if len(sub_links) >= 2:  # 首页 + 2 个子页 = 每域名最多 3 页
+        if len(sub_links) >= 4:  # 首页 + 4 个子页 = 每域名最多 5 页
             break
     for su in sub_links:
         if time.time() > deadline:
@@ -1700,10 +1700,22 @@ def _is_valid_email(em: str) -> bool:
 
 
 def _scan_emails(html_text: str, source_url: str, out: list, seen: set):
-    """从单页 HTML 提取邮箱并登记来源（out 追加，seen 去重）。"""
+    """从单页 HTML 提取邮箱并登记来源（out 追加，seen 去重）。
+    增强：Cloudflare cf-email 解码 + [at][dot] 混淆还原 + HTML 实体反转义。"""
     try:
-        for m in _EMAIL_RE.finditer(html_text or ""):
-            em = m.group(0)
+        import html as _html_mod
+        txt = _html_mod.unescape(html_text or "")
+        raw_emails = set(_EMAIL_RE.findall(txt))
+        # Cloudflare cf-email 解码
+        for mm in _CF_EMAIL_RE.finditer(html_text or ""):
+            d = _decode_cf_email(mm.group(1))
+            if "@" in d:
+                raw_emails.add(d)
+        # [at][dot] 混淆还原
+        for mm in _AT_DOT_RE.finditer(txt):
+            cand = f"{mm.group(1)}@{mm.group(2)}.{mm.group(3)}"
+            raw_emails.add(cand)
+        for em in raw_emails:
             if em in seen or not _is_valid_email(em):
                 continue
             seen.add(em)
@@ -4342,9 +4354,22 @@ def _search_ddg_single(query: str, timeout: int = 6) -> list:
 # ===== 官网联系页直取（补全升级4） =====
 # 只在公司"自家官网"同域抓首页+常见联系/关于页，不跨域、不爬深；只读公开 HTML，不提交表单/不登录。
 _CONTACT_PATH_CANDIDATES = (
-    "/contact", "/contact-us", "/contactus", "/contacts",
-    "/about", "/about-us", "/aboutus",
+    "/contact", "/contact-us", "/contactus", "/contacts", "/contact.html",
+    "/en/contact", "/en/contact-us", "/about/contact", "/get-in-touch", "/reach-us",
+    "/about", "/about-us", "/aboutus", "/about/company", "/company/contact",
+    "/imprint", "/impressum", "/kontakt", "/contatti", "/contacto", "/contactez-nous",
 )
+# Cloudflare cf-email 反混淆
+_CF_EMAIL_RE = re.compile(r'<a[^>]+class="__cf_email__"[^>]*data-cfemail="([0-9a-fA-F]+)"', re.I)
+# 常见 [at] [dot] 反混淆（info [at] example [dot] com）
+_AT_DOT_RE = re.compile(
+    r'([A-Za-z0-9._%+\-]{2,})\s*(?:\(|\[|\{)?\s*(?:@|\bat\b|\[at\]|\(at\)|\{at\}|\s+at\s+)\s*(?:\)|\]|\})?\s*'
+    r'([A-Za-z0-9.\-]+)\s*(?:\(|\[|\{)?\s*(?:\.|\bdot\b|\[dot\]|\(dot\)|\{dot\}|\s+dot\s+)\s*(?:\)|\]|\})?\s*'
+    r'([A-Za-z]{2,})',
+    re.I,
+)
+# 域名停放页典型特征：114–300字节极短正文 + 含 parked / for sale / buy this domain
+_PARKING_PAGE_RE = re.compile(r'parked|for sale|buy this domain|domain.*park|this domain.*expired', re.I)
 # 已知强反爬/JS 挑战域名：生产机房 IP 的轻量请求过不了（sgcaptcha / Cloudflare / 403），
 # 自动补全拿不到联系方式，直接标记转人工。后续实测发现新的同类站点追加到这里。
 _KNOWN_ANTIBOT_DOMAINS = {
@@ -4395,30 +4420,60 @@ def _site_root(url: str) -> str:
         return ""
 
 
+def _decode_cf_email(h: str) -> str:
+    """解码 Cloudflare cf-email data-cfemail 16 进制串。"""
+    try:
+        b = bytes.fromhex(h)
+        r = b[0]
+        return "".join(chr(x ^ r) for x in b[1:])
+    except Exception:
+        return ""
+
+
 def _parse_contact_html(html: str, host: str) -> dict:
-    """从单页 HTML 提取 邮箱/电话/LinkedIn/联系人；只在同域语境调用。"""
-    out = {"email": "", "phone": "", "linkedin": "", "decision_maker": ""}
+    """从单页 HTML 提取 邮箱/电话/LinkedIn/联系人；只在同域语境调用。
+    增强：Cloudflare cf-email 解码 + [at]/[dot] 混淆还原 + 域名停放页识别。"""
+    out = {"email": "", "phone": "", "linkedin": "", "decision_maker": "", "parking": False}
     if not html:
         return out
     # 反爬/JS 挑战页不含真实联系方式（且常带时间戳参数会被误认成电话），直接返回空
     if len(html) < 1200 and _ANTIBOT_CHALLENGE_RE.search(html):
         return out
-    # 1) 邮箱：职能邮箱优先；剔除图片后缀、平台事务邮箱
-    raw_emails = re.findall(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", html)
+    # 域名停放页（114–300 字节占位）：不是真企业站，标记后不在本域继续抓
+    if 80 < len(html) < 500 and _PARKING_PAGE_RE.search(html[:2000]):
+        out["parking"] = True
+        return out
+    # 1) 邮箱：标准正则 + cf-email 解码 + [at][dot] 混淆；职能邮箱优先
+    import html as _html_mod
+    txt = _html_mod.unescape(html or "")
+    raw_emails = set(_EMAIL_RE.findall(txt))
+    for mm in _CF_EMAIL_RE.finditer(html or ""):
+        d = _decode_cf_email(mm.group(1))
+        if "@" in d:
+            raw_emails.add(d)
+    for mm in _AT_DOT_RE.finditer(txt):
+        cand = f"{mm.group(1)}@{mm.group(2)}.{mm.group(3)}"
+        raw_emails.add(cand)
     func = []
     other = []
+    seen_em = set()
     for e in raw_emails:
-        el = e.lower()
+        el = e.lower().strip().strip(".,;:)'\"")
+        if el in seen_em:
+            continue
+        seen_em.add(el)
         if el.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")):
             continue
         if any(b in el for b in _CONTACT_EMAIL_BLOCK):
             continue
+        if not _is_valid_email(el):
+            continue
         local = el.split("@", 1)[0]
         if local in ("sales", "info", "contact", "enquiries", "inquiry", "inquiries",
                      "office", "admin", "export", "orders", "hello", "mail"):
-            func.append(e)
+            func.append(el)
         else:
-            other.append(e)
+            other.append(el)
     if func:
         out["email"] = func[0]
     elif other:
@@ -4503,6 +4558,10 @@ def _fetch_official_site_contacts(website: str, company: str = "") -> dict:
             result["antibot"] = True
             continue
         info = _parse_contact_html(html, host)
+        # 域名停放页：不是真企业站，标记后不在本域继续抓
+        if info.get("parking"):
+            result["antibot"] = True
+            continue
         if info["email"] and not result["email"]:
             result["email"] = info["email"]
         if info["phone"] and not result["phone"]:
@@ -4514,11 +4573,11 @@ def _fetch_official_site_contacts(website: str, company: str = "") -> dict:
         # 首页若已拿到邮箱+电话即可提前收工，减少请求
         if result["email"] and result["phone"]:
             break
-        # 从首页导航里再发现同域 contact/about 链接（最多补 2 个）
+        # 从首页导航里再发现同域联系/关于链接（最多补 6 个，含多语言）
         if len(seen_pages) <= 1:
             for m in re.finditer(r'href=["\']([^"\']+)["\']', html, re.I):
                 href = m.group(1).strip().lower()
-                if re.search(r"/(contact|about)[\w\-/]*(?:/)?$", href) and len(seen_pages) < 7:
+                if re.search(r"/(contact[\w\-/]*|about[\w\-/]*|imprint|impressum|kontakt|contatti|contacto|contactez-nous|get-in-touch|reach-us)(?:/)?$", href) and len(seen_pages) < 9:
                     if href.startswith("/"):
                         full = root + href
                     elif href.startswith(root):
@@ -4640,6 +4699,8 @@ async def deep_enrich_lead(company_name: str, country: str, website: str = "") -
             result["phone"] = site.get("phone", "")
             result["antibot"] = bool(site.get("antibot"))
             result["known_email"] = site.get("known_email", "") or ""
+            # 官网直取到的真实职能邮箱（区别于 known_email 人工登记）
+            result["email"] = site.get("email", "") or ""
         except Exception:
             pass
     loop = asyncio.get_event_loop()
@@ -4798,7 +4859,8 @@ async def _enrich_all_leads_async(new_leads: list):
                     lead.get("website", "")),
                 timeout=_ENRICH_TIMEOUT * 2)
             got_any = bool(deep.get("decision_maker") or deep.get("linkedin")
-                           or deep.get("phone") or deep.get("import_record"))
+                           or deep.get("phone") or deep.get("import_record")
+                           or deep.get("email"))
             if got_any:
                 enrich_state = "已深度补全"
             elif deep.get("antibot"):
@@ -4818,6 +4880,11 @@ async def _enrich_all_leads_async(new_leads: list):
             if deep.get("import_record"):
                 update_fields["进口记录"] = deep["import_record"]
                 lead["import_record"] = deep["import_record"]
+            # 深度补搜阶段也回写邮箱（修复历史写入遗漏）
+            if deep.get("email"):
+                update_fields["联系邮箱"] = deep["email"]
+                update_fields["邮箱来源"] = lead.get("website") or ""
+                lead["email"] = deep["email"]
             _update_leads_record(record_id, update_fields)
         except asyncio.TimeoutError:
             _update_leads_record(record_id, {"补搜状态": "补搜失败"})
