@@ -4688,7 +4688,7 @@ async def deep_enrich_lead(company_name: str, country: str, website: str = "") -
     """深度补搜：决策人、LinkedIn、进口记录、电话
     组合多维度搜索，提取关键商务信息；有官网时先登录联系页直取。"""
     result = {"decision_maker": "", "linkedin": "", "import_record": "", "phone": "",
-              "antibot": False, "known_email": ""}
+              "antibot": False, "known_email": "", "website": website}
     # 官网直取优先：电话/联系人/LinkedIn 从 contact/about 页拿，搜索摘要再补充
     if website:
         try:
@@ -7059,8 +7059,11 @@ async def api_leads_enrich(record_id: str, req: Optional[EnrichLeadRequest] = No
             if deep.get("email"):
                 update_fields["联系邮箱"] = deep["email"]
                 update_fields["邮箱来源"] = website or ""
+            # 官网：优先用 deep 返回值，否则用调用时传入的 website（可能来自原文链接）
             if deep.get("website"):
                 update_fields["官网"] = deep["website"]
+            elif website and not _tv(fields.get("官网")):
+                update_fields["官网"] = website
             # 重评分：有新增联系方式时重新计算综合评分
             if found_any or deep.get("email"):
                 try:
