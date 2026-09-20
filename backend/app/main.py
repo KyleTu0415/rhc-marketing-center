@@ -7034,7 +7034,8 @@ async def api_leads_enrich(record_id: str, req: Optional[EnrichLeadRequest] = No
             _update_leads_record(record_id, {"补搜状态": "深度补搜中"})
             deep = await deep_enrich_lead(company_name, country, website)
             found_any = bool(deep.get("decision_maker") or deep.get("linkedin")
-                             or deep.get("phone") or deep.get("import_record"))
+                             or deep.get("phone") or deep.get("import_record")
+                             or deep.get("email"))
             # 状态分三档：拿到信息=已深度补全；官网强反爬=需人工补全；其余=已检索未找到
             if found_any:
                 enrich_status = "已深度补全"
@@ -7054,6 +7055,28 @@ async def api_leads_enrich(record_id: str, req: Optional[EnrichLeadRequest] = No
                 update_fields["电话"] = deep["phone"]
             if deep.get("import_record"):
                 update_fields["进口记录"] = deep["import_record"]
+            # 深度补搜也回写邮箱和官网（与批量路径保持一致）
+            if deep.get("email"):
+                update_fields["联系邮箱"] = deep["email"]
+                update_fields["邮箱来源"] = website or ""
+            if deep.get("website"):
+                update_fields["官网"] = deep["website"]
+            # 重评分：有新增联系方式时重新计算综合评分
+            if found_any or deep.get("email"):
+                try:
+                    lead_info = {**{k: _tv(v) for k, v in fields.items()}, **deep}
+                    new_score, page_type, buyer_type = await call_coze_scoring_workflow(lead_info)
+                    update_fields["综合评分"] = new_score
+                    update_fields["评级"] = _grade_from_score(new_score)
+                    if page_type:
+                        update_fields["页面类型"] = page_type
+                    if buyer_type:
+                        update_fields["买家类型"] = buyer_type
+                    _ex = _ai_exclude_reason(page_type, buyer_type)
+                    if _ex:
+                        update_fields["系统排除"] = _ex
+                except Exception as e2:
+                    print(f"[enrich] 深度补搜重评分失败 ({record_id}): {e2}")
             _update_leads_record(record_id, update_fields)
             _invalidate_leads_cache()
             return {"ok": True, "message": ret_msg, "data": deep, "found_any": found_any,
