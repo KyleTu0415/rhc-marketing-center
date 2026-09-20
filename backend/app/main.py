@@ -716,6 +716,7 @@ LEADS_FIELD_MAP = {
     "买家类型": "买家类型",
     "系统排除": "系统排除",
     "市场优先级": "市场优先级",
+    "观察标签": "观察标签",
 }
 LEAD_ACTIVE_STATUS = ("跟进中", "已转客户")
 LEAD_STATUS_OPTIONS = ("跟进中", "已转客户", "已释放")
@@ -842,6 +843,9 @@ LEADS_FIELDS_SCHEMA = [
     {"field_name": "买家类型", "type": 1},   # 文本：importer/distributor/wholesaler/dealer/hospital/clinic/manufacturer/unknown（用文本避免单选枚举置空）
     {"field_name": "系统排除", "type": 1},   # 文本：AI/规则判定非买家时写排除原因（如 ai:not_company），公海池过滤；留空=正常。只标记不删除，可回滚
     {"field_name": "质量标记", "type": 1},   # 文本：一档规则直接定性跳过Coze时写 rule_finalized，便于误杀申诉回溯；空=经Coze或未落规则判定
+    {"field_name": "市场优先级", "type": 3,
+     "property": {"options": [{"name": n} for n in ("P0", "P1", "P2", "待识别")]}},
+    {"field_name": "观察标签", "type": 1},   # 文本：human_medical_mixed 等，标注需观察但不立即排除的线索
 ]
 
 
@@ -993,7 +997,7 @@ def _norm_lead_record(rec: dict) -> dict:
         out[short] = _tv(fl.get(full))
     # 市场优先级：优先读 bitable 字段值，否则从地区字段实时计算
     mp = out.get("市场优先级", "")
-    if not mp or mp not in ("P0", "P1", "P2"):
+    if not mp or mp not in ("P0", "P1", "P2", "待识别"):
         out["市场优先级"] = _get_market_priority(out.get("地区", ""))
     return out
 
@@ -1061,6 +1065,7 @@ class LeadUpdateRequest(BaseModel):
     email_source: Optional[str] = None
     exclusion: Optional[str] = None
     region: Optional[str] = None
+    observation: Optional[str] = None
 
 
 class LeadFindEmailRequest(BaseModel):
@@ -1168,6 +1173,8 @@ async def api_leads_update(record_id: str, req: LeadUpdateRequest, request: Requ
             fields["系统排除"] = req.exclusion.strip()
         if req.region is not None:
             fields["地区"] = req.region.strip()
+        if req.observation is not None:
+            fields["观察标签"] = req.observation.strip()
         if not fields:
             return {"ok": True, "message": "无需要更新的内容"}
         _feishu_api(
@@ -2686,6 +2693,8 @@ _MARKET_PRIORITY_P0 = {
     "India", "Pakistan", "Bangladesh", "Sri Lanka",
     # 中东（3）
     "UAE", "Saudi Arabia", "Turkey",
+    # 欧洲（7）
+    "Germany", "France", "United Kingdom", "Spain", "Italy", "Poland", "Netherlands",
 }
 _MARKET_PRIORITY_P1 = {
     # 大洋洲
@@ -2700,14 +2709,17 @@ _MARKET_PRIORITY_P1 = {
 
 
 def _get_market_priority(country: str) -> str:
-    """根据国家名称返回市场优先级 P0 / P1 / P2。
+    """根据国家名称返回市场优先级 P0 / P1 / P2 / 待识别。
     country 可以是英文国家名（如 'South Africa'）或中文区域-国家格式（如 '非洲 - South Africa'）。"""
     if not country:
-        return "P2"
+        return "待识别"
     # 处理 "区域 - 国家" 格式
     c = country.strip()
     if " - " in c:
         c = c.split(" - ", 1)[1].strip()
+    # 未知/空值归为待识别
+    if not c or c in ("未知", "unknown", ""):
+        return "待识别"
     # 标准化别名
     aliases = {"UK": "United Kingdom", "USA": "United States", "US": "United States"}
     c = aliases.get(c, c)
