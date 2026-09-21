@@ -3309,9 +3309,51 @@ def _filter_junk_results(results: list):
     return clean, len(results) - len(clean)
 
 
+def _tavily_api_search(query: str, timeout: int = 8) -> list:
+    """Tavily Search API（POST JSON，面向 AI 的搜索接口）。需环境变量 TAVILY_API_KEY。
+    返回 [{title, url, snippet}]；未配置 key 抛 RuntimeError 由上层回退。
+    作为 Brave 额度耗尽时的过渡引擎；任何失败均为普通异常，不触发整轮熔断。"""
+    key = os.environ.get("TAVILY_API_KEY", "").strip()
+    if not key:
+        raise RuntimeError("TAVILY_API_KEY 未配置")
+    import urllib.request as _tur
+    import urllib.error as _terr
+    url = "https://api.tavily.com/search"
+    payload = json.dumps({
+        "api_key": key,
+        "query": query,
+        "search_depth": "basic",
+        "max_results": 10,
+    }).encode("utf-8")
+    _headers = {"Content-Type": "application/json",
+                "Accept": "application/json", "User-Agent": _FIND_UA}
+    req = _tur.Request(url, headers=_headers, data=payload, method="POST")
+    try:
+        with _tur.urlopen(req, timeout=timeout) as r:
+            code = getattr(r, "status", 200)
+            body = r.read(1_500_000).decode("utf-8", "ignore")
+    except _terr.HTTPError as e:
+        try:
+            body = e.read(300_000).decode("utf-8", "ignore")
+        except Exception:
+            body = ""
+        code = e.code
+    if code != 200 or not body:
+        raise RuntimeError(f"Tavily http{code}")
+    data = json.loads(body)
+    out = []
+    for it in data.get("results") or []:
+        u = (it.get("url") or "").strip()
+        t = (it.get("title") or "").strip()
+        if u and t:
+            out.append({"title": t, "url": u,
+                        "snippet": (it.get("content") or "")[:300]})
+    return out
+
+
 def _multi_engine_search(query: str, timeout: int = 6, skip_brave: bool = False,
                          deadline: float = None) -> list:
-    """主动获客单查询：有 BRAVE_API_KEY 优先 Brave；否则/失败再回退
+    """主动获客单查询：有 TAVILY_API_KEY 优先 Tavily，其次 Brave；否则/失败再回退
     DDG GET → DDG POST → Bing。每个引擎结果先过滤聚合站，干净结果命中即返回；
     每个引擎真实状态写入 _lead_search_diag，避免静默吞错导致"假无线索"。
     skip_brave=True：熔断/免费回退模式，只打免费引擎。
@@ -3326,25 +3368,31 @@ def _multi_engine_search(query: str, timeout: int = 6, skip_brave: bool = False,
     }
     q = _up.urlencode({"q": query})
     engines = []
+    # Tavily 作为优先 API 引擎（Brave 额度耗尽时的过渡方案），失败为普通异常并继续回退
+    if os.environ.get("TAVILY_API_KEY", "").strip():
+        engines.append(("tavily", None, None, None, None, "tavily"))
     if os.environ.get("BRAVE_API_KEY", "").strip() and not skip_brave:
-        engines.append(("brave", None, None, None, _brave_api_search, True))
+        engines.append(("brave", None, None, None, _brave_api_search, "brave"))
     engines += [
         ("ddg_get", "https://html.duckduckgo.com/html/?" + q,
-         dict(base_headers), None, _parse_ddg_html_results, False),
+         dict(base_headers), None, _parse_ddg_html_results, "http"),
         ("ddg_post", "https://html.duckduckgo.com/html/",
          {**base_headers, "Content-Type": "application/x-www-form-urlencoded",
-          "Referer": "https://html.duckduckgo.com/"}, q, _parse_ddg_html_results, False),
+          "Referer": "https://html.duckduckgo.com/"}, q, _parse_ddg_html_results, "http"),
         ("bing", "https://www.bing.com/search?" + _up.urlencode({"q": query, "count": "20"}),
-         dict(base_headers), None, _parse_bing_html_results, False),
+         dict(base_headers), None, _parse_bing_html_results, "http"),
     ]
-    for name, url, headers, data, parser, is_brave in engines:
-        # 免费回退模式：非 Brave 引擎受 30 秒总预算约束，超时即放弃，不再干等
-        if not is_brave and deadline is not None and _time.monotonic() > deadline:
+    for name, url, headers, data, parser, kind in engines:
+        # 免费回退模式：普通引擎受 30 秒总预算约束，超时即放弃，不再干等
+        if kind != "brave" and deadline is not None and _time.monotonic() > deadline:
             _lead_search_diag["engine_status"][name] = "免费回退总预算超时，跳过"
             continue
         try:
-            if is_brave:
+            if kind == "brave":
                 raw = _brave_api_search(query, timeout)
+                code_note = "api"
+            elif kind == "tavily":
+                raw = _tavily_api_search(query, timeout)
                 code_note = "api"
             else:
                 code, body = _http_fetch_with_headers(url, headers, timeout, data)
