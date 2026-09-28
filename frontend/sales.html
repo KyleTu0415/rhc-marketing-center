@@ -2802,8 +2802,7 @@ function markSalesNotifyRead(i){
     .then(function(r){ if(!r.ok) throw new Error('fail');
       m.status='已读';
       renderSalesNotify();
-      loadSalesNotifyBadge();
-// 独立监听器：点击「通知」时自动全部标记已读（不依赖 switchPage 内联调用，确保稳定触发）
+      // 独立监听器：点击「通知」时自动全部标记已读（不依赖 switchPage 内联调用，确保稳定触发）
 (function(){
   function bind(){
     var nav=document.querySelector('.nav-item[data-page="notify"]');
@@ -2821,6 +2820,7 @@ function markSalesNotifyRead(i){
     bind();
   }
 })();
+loadSalesNotifyBadge();
     }).catch(function(){ showToast('操作失败，请重试','error'); });
 }
 function markAllSalesNotify(){
