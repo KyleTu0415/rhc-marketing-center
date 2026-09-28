@@ -5771,13 +5771,15 @@ def _run_lead_search_job(max_results: int = 30, custom_queries: Optional[list] =
                 except Exception as e:
                     print(f"[search-bg] 后台评分+补搜异常: {e}")
                 finally:
-                    # 仅最新轮次可释放锁/改全局；过期轮次的评分线程只收尾飞书写库
-                    if not _stale():
+                    # 修复：无论是否 stale，只要锁还在就释放
+                    if _search_in_progress:
                         _search_in_progress = False
                         _lead_search_job["running"] = False
                         if _lead_search_job.get("status") == "finished":
                             _lead_search_job["phase"] = "本轮 AI 评分与联系方式补全已完成"
-                    print(f"[search-bg] 轮次{round_id} 后台任务收尾（stale={_stale()}），锁={'释放' if not _stale() else '保留给新轮'}")
+                        print(f"[search-bg] 轮次{round_id} 后台任务收尾，锁已释放")
+                    else:
+                        print(f"[search-bg] 轮次{round_id} 后台任务收尾（锁已释放）")
             threading.Thread(target=_background_score_and_enrich, daemon=True).start()
 
         # 5) 为每条新线索自动创建消息通知（后台线程，不阻塞返回）
