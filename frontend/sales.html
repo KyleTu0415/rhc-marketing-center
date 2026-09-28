@@ -2806,13 +2806,24 @@ function markSalesNotifyRead(i){
     }).catch(function(){ showToast('操作失败，请重试','error'); });
 }
 function markAllSalesNotify(){
+  console.log('[notify] 开始标记全部已读');
   fetch('/api/messages/read-all',{method:'POST',headers:salesNotifyAuthHeaders(true)})
-    .then(function(r){ if(!r.ok) throw new Error('fail');
+    .then(function(r){ 
+      console.log('[notify] 响应状态:', r.status);
+      if(!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
+    .then(function(d){
+      console.log('[notify] 标记已读结果:', d);
       // 重新从服务器加载最新消息和数字
       loadSalesNotify();
       loadSalesNotifyBadge();
       showToast('已全部标记为已读','success');
-    }).catch(function(){ showToast('操作失败，请重试','error'); });
+    })
+    .catch(function(e){ 
+      console.error('[notify] 标记已读失败:', e);
+      showToast('操作失败，请重试','error'); 
+    });
 }
 function salesNotifyGotoSignal(){
   var nav=document.querySelector('.sidebar-nav .nav-item[data-page="signals"]');
