@@ -7376,23 +7376,19 @@ threading.Thread(target=_warmup_emails_table, daemon=True).start()
 
 
 
-# ============================================================
-# 临时清理接口（用完即删）：备份全量线索 → 删除所有线索
-# 密钥：rhc-clean-2026-0916
-# ============================================================
-_CLEANUP_KEY = "rhc-clean-2026-0916"
-
 @app.post("/api/admin/cleanup-all-leads")
 async def api_cleanup_all_leads(request: Request):
-    """临时清理：备份全量线索 → 删除所有线索。需密钥。"""
+    """清理线索：备份 + 删除。需登录 + admin 角色。"""
+    token = _get_token_from_request(request)
+    user_info = _verify_token(token) if token else None
+    if not user_info:
+        return JSONResponse({"ok": False, "message": "未登录"}, status_code=401)
+    if user_info.get("role") != "admin":
+        return JSONResponse({"ok": False, "message": "仅管理员可操作"}, status_code=403)
     try:
         body = await request.json()
     except Exception:
         body = {}
-    key = (body or {}).get("key", "")
-    if key != _CLEANUP_KEY:
-        return JSONResponse({"ok": False, "message": "密钥错误"}, status_code=403)
-    
     action = (body or {}).get("action", "scan")  # scan=预览, delete=删除
     
     tid = _ensure_leads_table()
