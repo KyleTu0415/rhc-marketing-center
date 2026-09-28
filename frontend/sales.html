@@ -1003,7 +1003,7 @@ function showAntibotGuide(opts){
 <script src="assets/rhc-config.js"></script>
 <script src="assets/rhc-insights.js?v=20260903a"></script>
 <script>
-function switchPage(pageId,el){document.querySelectorAll('.page').forEach(function(p){p.classList.remove('active')});var t=document.getElementById('page-'+pageId);if(t){t.classList.remove('active');void t.offsetWidth;t.classList.add('active')}document.querySelectorAll('.sidebar-nav .nav-item').forEach(function(n){n.classList.remove('active')});if(el)el.classList.add('active');var ca=document.querySelector('.content-area');if(ca)ca.scrollTop=0;if(pageId==='signals'){loadPublicPool(false);}if(pageId==='mycustomers'){loadMyCustomers();}if(pageId==='notify'&&typeof loadSalesNotify==='function'){loadSalesNotify();loadSalesNotifyBadge();markAllSalesNotify();}}
+function switchPage(pageId,el){document.querySelectorAll('.page').forEach(function(p){p.classList.remove('active')});var t=document.getElementById('page-'+pageId);if(t){t.classList.remove('active');void t.offsetWidth;t.classList.add('active')}document.querySelectorAll('.sidebar-nav .nav-item').forEach(function(n){n.classList.remove('active')});if(el)el.classList.add('active');var ca=document.querySelector('.content-area');if(ca)ca.scrollTop=0;if(pageId==='signals'){loadPublicPool(false);}if(pageId==='mycustomers'){loadMyCustomers();}if(pageId==='notify'&&typeof loadSalesNotify==='function'){loadSalesNotify();markAllSalesNotify();}}
 document.querySelectorAll('.sidebar-nav .nav-item').forEach(function(item){item.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();item.click()}})});
 /* ===== 产品清单（内置兜底，均为 RHC 真实在售产品；接口可用时以 /api/products 返回为准） ===== */
 var PRODUCTS=[
