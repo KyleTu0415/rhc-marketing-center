@@ -264,8 +264,8 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
           <div class="save-bar">
             <span class="sb-hint">保存后立即生效：销售智能助手「客户分级」看板所有客户按新规则重新打分排序。</span>
             <div class="sb-actions">
-              <button class="btn btn-outline" onclick="resetSection('grading')">恢复默认</button>
-              <button class="btn btn-primary" onclick="saveGrading()">保存规则</button>
+              <button class="btn btn-outline" data-cfg-write="1" onclick="resetSection('grading')">恢复默认</button>
+              <button class="btn btn-primary" data-cfg-write="1" onclick="saveGrading()">保存规则</button>
             </div>
           </div>
         </div>
@@ -305,8 +305,8 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
           <div class="save-bar">
             <span class="sb-hint">信号分配模式（抢单/AI分配/混合制）待与业务方确认后在此扩展配置。</span>
             <div class="sb-actions">
-              <button class="btn btn-outline" onclick="resetSection('signal')">恢复默认</button>
-              <button class="btn btn-primary" onclick="saveSignal()">保存规则</button>
+              <button class="btn btn-outline" data-cfg-write="1" onclick="resetSection('signal')">恢复默认</button>
+              <button class="btn btn-primary" data-cfg-write="1" onclick="saveSignal()">保存规则</button>
             </div>
           </div>
         </div>
@@ -339,8 +339,8 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
           <div class="save-bar">
             <span class="sb-hint">保存后邮件助手新生成的邮件自动遵循最新规范。</span>
             <div class="sb-actions">
-              <button class="btn btn-outline" onclick="resetSection('mail')">恢复默认</button>
-              <button class="btn btn-primary" onclick="saveMail()">保存规范</button>
+              <button class="btn btn-outline" data-cfg-write="1" onclick="resetSection('mail')">恢复默认</button>
+              <button class="btn btn-primary" data-cfg-write="1" onclick="saveMail()">保存规范</button>
             </div>
           </div>
         </div>
@@ -472,8 +472,8 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
           <div class="save-bar">
             <span class="sb-hint">保存后市场洞察板块立即按新偏好筛选与排序。</span>
             <div class="sb-actions">
-              <button class="btn btn-outline" onclick="resetSection('news')">恢复默认</button>
-              <button class="btn btn-primary" onclick="saveNews()">保存偏好</button>
+              <button class="btn btn-outline" data-cfg-write="1" onclick="resetSection('news')">恢复默认</button>
+              <button class="btn btn-primary" data-cfg-write="1" onclick="saveNews()">保存偏好</button>
             </div>
           </div>
         </div>
@@ -578,6 +578,7 @@ function updateTotal(){
 
 /* ===== 新闻偏好 · 分类复选框 ===== */
 function toggleCatCheck(label){
+  if(CURRENT_USER&&CURRENT_USER.role==='viewer')return;
   var cb=label.querySelector('input');
   /* toggle */
   cb.checked=!cb.checked;
@@ -626,6 +627,7 @@ function loadAll(){
   document.getElementById('n-sort-by').value=n.sortBy||'date';
 }
 function persist(section){
+  if(CURRENT_USER&&CURRENT_USER.role==='viewer'){showToast('观察者只读','error');return}
   RHC_CONFIG.save(buildConfig());
   window.dispatchEvent(new Event('rhc-config-changed'));
   showToast(section+'已保存，相关模块即时生效','success');
@@ -683,6 +685,7 @@ function saveSignal(){
 function saveMail(){persist('邮件写作规范')}
 function saveNews(){persist('新闻偏好')}
 function resetSection(sec){
+  if(CURRENT_USER&&CURRENT_USER.role==='viewer'){showToast('观察者只读','error');return}
   if(!confirm('恢复该板块为系统默认规则？当前修改将丢失。'))return;
   var def=RHC_CONFIG.DEFAULT;
   var cur=buildConfig();
@@ -719,6 +722,18 @@ function roleTag(role){
   return '<span class="tag tag-gray">观察者</span>';
 }
 
+function applyViewerConfigReadonly(){
+  if(!(CURRENT_USER&&CURRENT_USER.role==='viewer'))return;
+  document.querySelectorAll('[data-cfg-write]').forEach(function(btn){btn.style.display='none';});
+  ['page-grading','page-signal','page-mail','page-news'].forEach(function(id){
+    var page=document.getElementById(id);
+    if(!page)return;
+    page.querySelectorAll('input,textarea,select').forEach(function(el){
+      if(el.tagName==='SELECT'||el.type==='checkbox'||el.type==='number'||el.type==='radio')el.disabled=true;
+      else el.readOnly=true;
+    });
+  });
+}
 function initAccounts(){
   fetch('/api/auth/me',{headers:accAuthHeaders()})
     .then(function(r){return r.json();})
@@ -728,6 +743,7 @@ function initAccounts(){
       var isAdmin = CURRENT_USER.role==='admin';
       document.getElementById('btn-add-account').style.display = isAdmin ? 'inline-flex' : 'none';
       document.getElementById('accounts-readonly-notice').style.display = isAdmin ? 'none' : 'flex';
+      applyViewerConfigReadonly();
       loadAccounts();
     })
     .catch(function(){ window.location.href='login.html'; });
