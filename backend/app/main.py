@@ -7640,11 +7640,11 @@ async def api_batch_region(req: BatchRegionRequest, request: Request):
     return {"ok": True, "updated": updated, "errors": errors, "total": len(req.items)}
 
 
-# Serve frontend - try multiple possible locations
+# Serve frontend - 按确定性优先级选择第一个存在的目录（仓库根 frontend 为权威版本）
 _candidate_dirs = [
-    os.path.join(os.path.dirname(__file__), "frontend"),                              # Railway root=backend/: /app/frontend
-    os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend"),              # Railway root=repo: /backend/frontend
-    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "frontend"),  # extra fallback
+    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "frontend"),  # <repo>/frontend（权威，优先）
+    os.path.join(os.path.dirname(__file__), "frontend"),                                 # /app/frontend
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend"),                # /backend/frontend（旧副本，兜底）
 ]
 static_dir = None
 for _d in _candidate_dirs:
