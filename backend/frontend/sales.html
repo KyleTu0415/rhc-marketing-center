@@ -955,7 +955,8 @@ function showAntibotGuide(opts){
       <div class="cd-history" id="cd-history">
         <div class="cd-history-empty">加载中…</div>
       </div>
-      <!-- 下半：开发信 -->
+      <!-- 下半：开发信（观察者登录后整段隐藏） -->
+      <div id="cd-compose">
       <div class="cd-section-title">✉️ 撰写开发信</div>
       <div class="form-group">
         <label>收件人邮箱</label>
@@ -990,6 +991,7 @@ function showAntibotGuide(opts){
       <div class="form-group" style="margin-bottom:6px">
         <label>正文（可编辑，英文）</label>
         <textarea id="cd-body" rows="10" style="min-height:200px" placeholder="Dear ..."></textarea>
+      </div>
       </div>
     </div>
     <div class="cd-modal-footer">
@@ -1413,13 +1415,14 @@ function renderMail(text,source){
   copyBtn.style.display='inline-flex';
   // 有收件邮箱时显示「发送邮件」（真实 SMTP 发信，落邮件记录）
   var sendBtn=document.getElementById('mail-send-btn');
-  if(sendBtn)sendBtn.style.display=currentMailRecipient?'inline-flex':'none';
+  if(sendBtn)sendBtn.style.display=(!isViewerRole()&&currentMailRecipient)?'inline-flex':'none';
   if(source)showToast(source,'success');
 }
 /* ===== 真实发信：POST /api/mails/send（SMTP SSL，发送前二次确认） ===== */
 var currentMailSubject='';
 var currentMailBody='';
 function sendMailReal(){
+  if(blockViewerWrite())return;
   if(!currentMailText){showToast('请先生成邮件','error');return}
   var ctx=getMailCustomer();
   var to=(currentMailRecipient||ctx.email||'').trim();
@@ -1573,13 +1576,14 @@ function generatePI(){
       '<table class="pi-table"><thead><tr><th>产品</th><th class="pi-qty">数量</th><th class="pi-price">单价</th><th class="pi-price">金额</th></tr></thead><tbody>'+rows+'</tbody></table>'+
       '<div class="pi-total-row"><span>合计：</span><strong>待销售填写（价格隔离：单价/合计仅销售角色可见）</strong></div>'+
       '<div class="pi-terms"><strong>条款：</strong><br>付款方式：待销售填写　|　贸易术语（Incoterms）：待销售填写　|　交货期：待销售填写<br>质保：按 RHC 标准质保条款执行　|　报价有效期：待销售填写</div>'+
-      '<div style="display:flex;gap:10px;margin-top:16px;justify-content:flex-end;flex-wrap:wrap"><button class="btn btn-primary btn-sm" onclick="savePiDraft()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg> 保存为 PI 草稿</button></div>'+
+      (isViewerRole()?'':'<div style="display:flex;gap:10px;margin-top:16px;justify-content:flex-end;flex-wrap:wrap"><button class="btn btn-primary btn-sm" id="pi-save-draft-btn" onclick="savePiDraft()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg> 保存为 PI 草稿</button></div>')+
       '<div class="pi-note">注：当前为预览，单价与合计由销售按权限填写；保存草稿后进入「已开 PI 列表」，状态推进为已发送/已确认/已成交时漏斗同步点亮。</div>'+
     '</div>';
   showToast('PI 预览已生成','success');
 }
 /* 保存 PI 草稿：POST /api/pi（落订单表，PI状态=草稿） */
 function savePiDraft(){
+  if(blockViewerWrite())return;
   var d=window.__lastPiDraft;
   if(!d){showToast('请先生成 PI 预览','error');return}
   if(!d.customer_name){showToast('缺少客户名称','error');return}
@@ -1675,6 +1679,47 @@ function loadCurrentUser(){
       return currentUser
     })
     .catch(function(){return null});
+}
+/* 角色只看 /api/auth/me 写入的 currentUser，不看地址栏或手填姓名 */
+function isViewerRole(){
+  return !!(currentUser&&currentUser.role==='viewer');
+}
+function blockViewerWrite(){
+  if(!isViewerRole())return false;
+  showToast('观察者只读','error');
+  return true;
+}
+function applyRoleChrome(){
+  var resetBtn=document.getElementById('reset-search-btn');
+  if(resetBtn){
+    resetBtn.style.display=(currentUser&&currentUser.role==='admin')?'inline-flex':'none';
+  }
+  if(!isViewerRole())return;
+  ['search-new-btn','mail-send-btn','mail-sync-btn','cd-release-btn','cd-send-btn','cd-gen-btn'].forEach(function(id){
+    var el=document.getElementById(id);
+    if(el)el.style.display='none';
+  });
+  var compose=document.getElementById('cd-compose');
+  if(compose)compose.style.display='none';
+  ['cd-email','cd-cc','cd-selling-points','cd-subject','cd-body'].forEach(function(id){
+    var el=document.getElementById(id);
+    if(el)el.readOnly=true;
+  });
+  var tone=document.getElementById('cd-tone');
+  if(tone)tone.disabled=true;
+  if(publicPoolLoaded&&typeof renderPublicPool==='function')renderPublicPool();
+  if(myCustomersLoaded&&typeof renderMyCustomers==='function')renderMyCustomers();
+  var searchBox=document.getElementById('search-results-list');
+  if(searchBox&&lastSearchResultLeads&&lastSearchResultLeads.length){
+    searchBox.innerHTML=lastSearchResultLeads.map(function(ld){return renderLeadCard(ld,'public');}).join('');
+  }
+  if(sigLoaded&&typeof renderSignals==='function'){
+    try{renderSignals()}catch(e){}
+  }
+  var leadBox=document.getElementById('lead-list');
+  if(leadBox&&leadsLoaded&&typeof renderLeads==='function'){
+    try{renderLeads()}catch(e){}
+  }
 }
 
 function hexToRgba(hex,alpha){
@@ -1799,8 +1844,10 @@ function renderSignals(){
     var viewBtn=url
       ? '<a class="btn btn-outline btn-sm" href="'+esc(url)+'" target="_blank" rel="noopener noreferrer">查看原文 ↗</a>'
       : '<span class="tag tag-gray" style="font-size:11px">原文链接暂缺</span>';
-    var claimBtn;
-    if(it.claimed){
+    var claimBtn='';
+    if(isViewerRole()){
+      claimBtn='';
+    }else if(it.claimed){
       if(it.claimed_by&&uname&&it.claimed_by===uname){
         claimBtn='<button type="button" class="btn btn-primary btn-sm" onclick="goMyLeads()">已认领 · 去跟进</button>';
       }else{
@@ -1831,6 +1878,7 @@ function renderSignals(){
 function goMyLeads(){setSignalView('mine')}
 /* 认领：真实落库 POST /api/leads/claim；成功后信号按钮即时切换状态 */
 function claimSignal(id,btn){
+  if(blockViewerWrite())return;
   var it=null;
   for(var i=0;i<sigAll.length;i++){
     var oid=sigAll[i].id!=null&&String(sigAll[i].id)!==''?String(sigAll[i].id):('sig-'+i);
@@ -2007,7 +2055,8 @@ function renderLeads(){
     var active=status==='跟进中';
     var inactive=!active;
     var released=status==='已释放';
-    var fieldDis=inactive?' disabled':'';
+    var viewer=isViewerRole();
+    var fieldDis=inactive?' disabled':(viewer?' readonly':'');
     var fields=
       '<div class="lead-fields">'+
         '<div><label>公司 / 机构</label><input type="text" id="lf-company-'+rid+'" value="'+esc(company)+'" placeholder="未自动识别，请填写公司/机构名"'+fieldDis+'></div>'+
@@ -2022,19 +2071,23 @@ function renderLeads(){
     var actionsHtml='';
     if(active){
       var actions=[];
-      actions.push('<button type="button" class="btn btn-primary btn-sm" id="find-email-btn-'+rid+'" onclick="findLeadEmail(\''+esc(rid)+'\',this)">智能查找邮箱</button>');
+      if(!viewer)actions.push('<button type="button" class="btn btn-primary btn-sm" id="find-email-btn-'+rid+'" onclick="findLeadEmail(\''+esc(rid)+'\',this)">智能查找邮箱</button>');
       actions.push('<button type="button" class="btn-text-muted" onclick="manualSearchLead(\''+esc(rid)+'\')">手动搜索</button>');
       if(url)actions.push('<a class="btn btn-outline btn-sm" href="'+esc(url)+'" target="_blank" rel="noopener noreferrer">查看原文 ↗</a>');
-      actions.push('<button type="button" class="btn btn-primary btn-sm" onclick="writeLeadMail(\''+esc(rid)+'\')">写开发信</button>');
-      actions.push('<button type="button" class="btn btn-outline btn-sm" onclick="saveLead(\''+esc(rid)+'\',this)">保存</button>');
-      actions.push('<button type="button" class="btn btn-outline btn-sm" style="color:var(--color-danger)" onclick="releaseLead(\''+esc(rid)+'\','+jsStrQ(company)+')">释放</button>');
+      if(!viewer){
+        actions.push('<button type="button" class="btn btn-primary btn-sm" onclick="writeLeadMail(\''+esc(rid)+'\')">写开发信</button>');
+        actions.push('<button type="button" class="btn btn-outline btn-sm" onclick="saveLead(\''+esc(rid)+'\',this)">保存</button>');
+        actions.push('<button type="button" class="btn btn-outline btn-sm" style="color:var(--color-danger)" onclick="releaseLead(\''+esc(rid)+'\','+jsStrQ(company)+')">释放</button>');
+      }else{
+        actions.push('<span style="color:var(--color-text-tertiary)">观察者只读</span>');
+      }
       actionsHtml='<div class="lead-actions" style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">'+actions.join('')+'</div>';
     }else{
       var ro=[];
       if(url)ro.push('<a class="btn btn-outline btn-sm" href="'+esc(url)+'" target="_blank" rel="noopener noreferrer">查看原文 ↗</a>');
       ro.push('<span style="color:var(--color-text-tertiary)">'+(released?'该线索已释放回公共池，字段只读':'该线索已转为客户，字段只读')+'</span>');
       actionsHtml='<div class="lead-actions-readonly">'+ro.join('')+'</div>';
-      if(released){
+      if(released&&!viewer){
         actionsHtml+='<div class="lead-card-bottom"><button type="button" class="btn-text-danger" onclick="deleteLead(\''+esc(rid)+'\')">删除记录</button></div>';
       }
     }
@@ -2053,6 +2106,7 @@ function renderLeads(){
   el.innerHTML=html;
 }
 function saveLead(rid,btn){
+  if(blockViewerWrite())return;
   var company=(document.getElementById('lf-company-'+rid)||{}).value||'';
   var email=(document.getElementById('lf-email-'+rid)||{}).value||'';
   var note=(document.getElementById('lf-note-'+rid)||{}).value||'';
@@ -2092,6 +2146,7 @@ function jsStrQ(s){
    rid/companyName 可省略：在客户详情弹窗中调用时取当前打开的客户。
    释放后跟进状态、发信历史、评分均保留，客户回到公海可被他人认领。 */
 function releaseLead(rid,companyName){
+  if(blockViewerWrite())return;
   if(rid==null&&currentDetailLead){rid=currentDetailLead.rid;}
   if(companyName==null&&currentDetailLead){companyName=currentDetailLead.company;}
   rid=String(rid==null?'':rid);
@@ -2136,6 +2191,7 @@ function manualSearchLead(rid){
 }
 /* 智能查找邮箱：后端自动搜官网/联系页/新闻原文，返回候选供人工审核采用 */
 function findLeadEmail(rid,btn){
+  if(blockViewerWrite())return;
   var box=document.getElementById('find-email-results-'+rid);
   var _ci=document.getElementById('lf-company-'+rid);
   var _company=_ci?_ci.value.trim():'';
@@ -2204,6 +2260,7 @@ function adoptLeadEmail(rid,idx){
   showToast('已填入，请核对后点保存','success');
 }
 function deleteLead(rid){
+  if(blockViewerWrite())return;
   if(!confirm('彻底删除这条线索记录？删除后不可恢复'))return;
   fetch('/api/leads/'+encodeURIComponent(rid),{
     method:'DELETE',
@@ -2364,7 +2421,7 @@ renderProductPick();
 renderMailProducts(PRODUCTS);
 renderMailMaterials();
 renderStylePanel();
-loadCurrentUser().then(function(){ loadPublicPool(false); });
+loadCurrentUser().then(function(){ applyRoleChrome(); loadPublicPool(false); });
 loadMyCustomers();
 fetch('/api/products',{cache:'no-store'})
   .then(function(r){if(!r.ok)throw new Error('products '+r.status);return r.json()})
@@ -2504,6 +2561,7 @@ function loadInbox(){
     .catch(function(){/* 邮件记录表未建或未登录：保持空状态 */});
 }
 function syncInbox(){
+  if(blockViewerWrite())return;
   var btn=document.getElementById('mail-sync-btn');
   if(btn){btn.disabled=true;btn.textContent='同步中…'}
   fetch('/api/mails/sync',{method:'POST',headers:authHeaders()})
@@ -3118,9 +3176,14 @@ function renderLeadCard(ld,scope){
   h+='</div>';
   if(n.followAdvice)h+='<div class="lpc-hint"><strong>💡 跟进建议：</strong>'+esc(n.followAdvice)+'</div>';
   if(n.sourceUrl)h+='<div class="lpc-source-line"><a href="'+esc(n.sourceUrl)+'" target="_blank" rel="noopener noreferrer">查看来源 ↗</a></div>';
-  /* 底行操作 */
+  /* 底行操作：观察者不渲染认领/写开发信/释放/补全 */
   h+='<div class="lpc-actions">';
-  if(scope==='mine'){
+  if(isViewerRole()){
+    if(scope==='mine'||isMine){
+      var viewScope=scope==='mine'?'mine':'public';
+      h+='<button type="button" class="btn btn-outline btn-sm" onclick="openCustomerDetail(\''+ridAttr+'\',\''+viewScope+'\',false)">查看详情</button>';
+    }
+  }else if(scope==='mine'){
     h+='<button type="button" class="btn btn-primary btn-sm" onclick="openCustomerDetail(\''+ridAttr+'\',\'mine\',true)">✉️ 写开发信</button>';
     h+='<button type="button" class="btn btn-outline btn-sm" onclick="openCustomerDetail(\''+ridAttr+'\',\'mine\',false)">查看详情</button>';
     h+='<button type="button" class="btn btn-outline-danger btn-sm" onclick="releaseLead('+jsStrQ(n.rid)+','+jsStrQ(n.company)+')">释放</button>';
@@ -3133,7 +3196,7 @@ function renderLeadCard(ld,scope){
   }else{
     h+='<button type="button" class="btn btn-primary btn-sm" onclick="claimLead(\''+ridAttr+'\',this)">认领</button>';
   }
-  if(scope==='public')h+=buildEnrichButtonHtml(n.rid,n.enrichStatus);
+  if(scope==='public'&&!isViewerRole())h+=buildEnrichButtonHtml(n.rid,n.enrichStatus);
   h+='</div>';
   h+='</div>';
   return h;
@@ -3244,14 +3307,18 @@ function renderCompactPoolCard(ld,claimerName){
   h+=tags.join('<span class="lpc-sep">·</span>');
   if(!tags.length)h+='<span style="color:var(--color-text-tertiary)">暂无详细信息</span>';
   h+='</div>';
-  // 第三行：认领、补全信息、查看来源
+  // 第三行：认领、补全信息、查看来源（观察者只留来源与只读详情）
   h+='<div class="lpc-compact-row3">';
-  if(!n.isClaimed){
+  if(isViewerRole()){
+    if(isMine){
+      h+='<button type="button" class="btn btn-outline btn-sm" onclick="openCustomerDetail(\''+ridAttr+'\',\'public\',false)">详情</button>';
+    }
+  }else if(!n.isClaimed){
     h+='<button type="button" class="btn btn-primary btn-sm" onclick="claimLead(\''+ridAttr+'\',this)">认领</button>';
   }else if(isMine){
     h+='<button type="button" class="btn btn-outline btn-sm" onclick="openCustomerDetail(\''+ridAttr+'\',\'public\',false)">详情</button>';
   }
-  h+=buildEnrichButtonHtml(n.rid,n.enrichStatus);
+  if(!isViewerRole())h+=buildEnrichButtonHtml(n.rid,n.enrichStatus);
   if(n.sourceUrl)h+='<a href="'+esc(n.sourceUrl)+'" target="_blank" rel="noopener noreferrer">查看来源 ↗</a>';
   h+='</div>';
   h+='</div>';
@@ -3296,6 +3363,7 @@ function buildEnrichButtonHtml(rid,status){
 }
 /* 补全信息：POST /api/leads/{record_id}/enrich */
 function enrichLead(rid,btn){
+  if(blockViewerWrite())return;
   if(!rid)return;
   /* 优化4：30秒锁定检查 */
   if(isEnrichLocked(rid)){
@@ -3421,6 +3489,7 @@ function startEnrichmentPolling(){
 }
 
 function claimLead(rid,btn){
+  if(blockViewerWrite())return;
   var claimerName=getClaimerName();
   if(!claimerName){showToast('请先登录后再认领','error');return}
   if(btn){btn.disabled=true;btn.textContent='认领中…'}
@@ -3556,6 +3625,7 @@ function resetSearchState() {
     }).catch(function() { showToast('网络错误，请稍后重试','error'); });
 }
 function searchNewLeads() {
+  if(blockViewerWrite())return;
   var btn = document.getElementById('search-new-btn');
   // 防止重复点击：按钮已禁用时直接返回
   if(btn && btn.disabled) return;
@@ -3706,6 +3776,7 @@ function findLeadRecordById(rid){
 }
 
 function openCustomerDetail(rid,scope,writeMode){
+  if(isViewerRole())writeMode=false;
   var raw=findLeadRecordById(rid);
   if(!raw){showToast('未找到该客户，请刷新列表后重试','error');return}
   var n=normalizeLead(raw);
@@ -3762,9 +3833,17 @@ function openCustomerDetail(rid,scope,writeMode){
   genNote.textContent='';genNote.className='cd-gen-note';
 
   document.getElementById('customer-detail-modal').classList.add('show');
-  // 仅当前销售本人认领时显示「释放回公海」；非本人/未认领不显示
+  // 仅当前销售本人认领时显示「释放回公海」；观察者与非本人不显示
   var releaseBtn=document.getElementById('cd-release-btn');
-  if(releaseBtn)releaseBtn.style.display=(n.isClaimed&&claimerName&&n.claimer===claimerName)?'':'none';
+  if(releaseBtn)releaseBtn.style.display=(!isViewerRole()&&n.isClaimed&&claimerName&&n.claimer===claimerName)?'':'none';
+  if(isViewerRole()){
+    var sendBtn=document.getElementById('cd-send-btn');
+    var genBtn=document.getElementById('cd-gen-btn');
+    var compose=document.getElementById('cd-compose');
+    if(sendBtn)sendBtn.style.display='none';
+    if(genBtn)genBtn.style.display='none';
+    if(compose)compose.style.display='none';
+  }
   loadEmailHistory(n.rid);
   if(writeMode){
     setTimeout(function(){
@@ -3832,6 +3911,7 @@ function loadEmailHistory(rid){
 
 /* AI 生成开发信：POST /api/emails/generate */
 function generateCustomerEmail(){
+  if(blockViewerWrite())return;
   var n=currentDetailLead;
   if(!n)return;
   var recipient=document.getElementById('cd-email').value.trim();
@@ -3882,6 +3962,7 @@ function generateCustomerEmail(){
 
 /* 发送开发信：POST /api/emails/send（真实邮箱发出，发送前二次确认） */
 function sendCustomerEmail(){
+  if(blockViewerWrite())return;
   var n=currentDetailLead;
   if(!n)return;
   var recipient=document.getElementById('cd-email').value.trim();

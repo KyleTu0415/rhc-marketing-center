@@ -180,7 +180,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
     <section class="page active" id="page-list">
     <div class="page-header">
       <div><h2>客户档案</h2><p>全部客户信息、跟进状态与关联订单</p></div>
-      <div class="page-header-actions"><button class="btn btn-primary btn-sm" onclick="openAddModal()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> 新增客户</button></div>
+      <div class="page-header-actions"><button class="btn btn-primary btn-sm" id="btn-add-customer" onclick="openAddModal()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> 新增客户</button></div>
     </div>
     <div class="filter-bar">
       <div class="search-wrap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><input type="text" id="search-input" placeholder="搜索客户名称 / 国家地区 / 联系人…" oninput="renderTable()"></div>
@@ -226,7 +226,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--color-primary);box-sh
       </div>
       <div class="form-group"><label>主营产品</label><input type="text" id="nf-products" placeholder="如：X35VET兽用麻醉机、SA Series注射泵"></div>
     </div>
-    <div class="modal-footer"><button class="btn btn-outline" onclick="closeModal('add-modal')">取消</button><button class="btn btn-primary" onclick="saveCustomer()">保存客户</button></div>
+    <div class="modal-footer"><button class="btn btn-outline" onclick="closeModal('add-modal')">取消</button><button class="btn btn-primary" id="btn-save-customer" onclick="saveCustomer()">保存客户</button></div>
   </div>
 </div>
 <div class="toast" id="toast"></div>
@@ -369,12 +369,34 @@ function openDetail(idx){
   openModal('detail-modal');
 }
 
+var currentUser=null;
+function isViewerRole(){return !!(currentUser&&currentUser.role==='viewer')}
+function applyCustomerRole(){
+  if(!isViewerRole())return;
+  var add=document.getElementById('btn-add-customer');
+  if(add)add.style.display='none';
+  var save=document.getElementById('btn-save-customer');
+  if(save)save.style.display='none';
+  ['nf-name','nf-country','nf-contact','nf-products'].forEach(function(id){
+    var el=document.getElementById(id);if(el)el.readOnly=true;
+  });
+  var st=document.getElementById('nf-status');if(st)st.disabled=true;
+}
+function loadCurrentUser(){
+  var token=localStorage.getItem('rhc_auth_token');
+  return fetch('/api/auth/me',{headers:token?{'Authorization':'Bearer '+token}:{},cache:'no-store'})
+    .then(function(r){return r.ok?r.json():{ok:false}})
+    .then(function(d){if(d&&d.ok)currentUser=d.user;applyCustomerRole();return currentUser})
+    .catch(function(){return null});
+}
 function openAddModal(){
+  if(isViewerRole()){showToast('观察者只读','error');return}
   ['nf-name','nf-country','nf-contact','nf-products'].forEach(function(id){document.getElementById(id).value=''});
   document.getElementById('nf-status').value='初步接触';
   openModal('add-modal');
 }
 function saveCustomer(){
+  if(isViewerRole()){showToast('观察者只读','error');return}
   var name=document.getElementById('nf-name').value.trim();
   var country=document.getElementById('nf-country').value.trim();
   if(!name||!country){showToast('请填写客户名称和国家/地区','error');return}
@@ -394,6 +416,7 @@ function saveCustomer(){
   showToast('已暂存（框架阶段存本地；正式版写入飞书客户表）','success');
 }
 
+loadCurrentUser();
 fetch('data/snapshot.json',{cache:'no-store'})
   .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()})
   .then(function(d){
