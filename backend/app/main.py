@@ -173,6 +173,27 @@ def _require_login(request: Request):
         return JSONResponse({"ok": False, "message": "未登录"}, status_code=401)
     return None
 
+def _reject_viewer(user_info):
+    """观察者只读。已登录且 role=viewer 时，业务写接口在副作用前返回 403。
+    admin 与 sales 放行；读/列表接口不要调用本函数。"""
+    if user_info and user_info.get("role") == "viewer":
+        return JSONResponse({"ok": False, "message": "观察者只读"}, status_code=403)
+    return None
+
+def _require_admin_user(user_info):
+    """管理写接口：未登录 401，已登录但不是 admin 则 403。"""
+    if not user_info:
+        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    if user_info.get("role") != "admin":
+        return JSONResponse({"ok": False, "message": "需要管理员权限"}, status_code=403)
+    return None
+
+def _auth_display_name(user_info) -> str:
+    """认领、释放、私海身份只取登录用户姓名，不采用客户端传入的名字。"""
+    if not user_info:
+        return ""
+    return (user_info.get("name") or user_info.get("username") or "").strip()
+
 class LoginRequest(BaseModel):
     username: str = ""
     password: str = ""
@@ -1099,6 +1120,9 @@ async def api_leads_claim(req: LeadClaimRequest, request: Request):
     user_info = _verify_token(token) if token else None
     if not user_info:
         return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    blocked = _reject_viewer(user_info)
+    if blocked:
+        return blocked
     title = (req.title or "").strip()
     if not title:
         return JSONResponse({"ok": False, "message": "线索标题不能为空"}, status_code=400)
@@ -1172,6 +1196,9 @@ async def api_leads_update(record_id: str, req: LeadUpdateRequest, request: Requ
     user_info = _verify_token(token) if token else None
     if not user_info:
         return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    blocked = _reject_viewer(user_info)
+    if blocked:
+        return blocked
     try:
         tid = _ensure_leads_table()
         fields = {}
@@ -1233,6 +1260,9 @@ async def api_leads_delete(record_id: str, request: Request):
     user_info = _verify_token(token) if token else None
     if not user_info:
         return JSONResponse({"detail": "未登录或登录已过期"}, status_code=401)
+    blocked = _reject_viewer(user_info)
+    if blocked:
+        return blocked
     try:
         leads = _fetch_leads(force_refresh=True)
         target = None
@@ -1886,6 +1916,9 @@ async def api_product_create(req: ProductUpsertRequest, request: Request):
     denied = _require_login(request)
     if denied:
         return denied
+    blocked = _reject_viewer(_verify_token(_get_token_from_request(request) or ""))
+    if blocked:
+        return blocked
     import urllib.request as _ur
     try:
         fields = {"product_model": req.product_model, "product_name_cn": req.product_name,
@@ -1913,6 +1946,9 @@ async def api_product_update(record_id: str, req: ProductUpsertRequest, request:
     denied = _require_login(request)
     if denied:
         return denied
+    blocked = _reject_viewer(_verify_token(_get_token_from_request(request) or ""))
+    if blocked:
+        return blocked
     import urllib.request as _ur
     try:
         fields = {}
@@ -1943,6 +1979,9 @@ async def api_product_delete(record_id: str, request: Request):
     denied = _require_login(request)
     if denied:
         return denied
+    blocked = _reject_viewer(_verify_token(_get_token_from_request(request) or ""))
+    if blocked:
+        return blocked
     import urllib.request as _ur
     try:
         rq = _ur.Request(
@@ -1961,6 +2000,9 @@ async def api_cutout(request: Request):
     denied = _require_login(request)
     if denied:
         return denied
+    blocked = _reject_viewer(_verify_token(_get_token_from_request(request) or ""))
+    if blocked:
+        return blocked
     try:
         form = await request.form()
         file = form.get("file")
@@ -2165,6 +2207,9 @@ async def api_upload_image(request: Request):
     denied = _require_login(request)
     if denied:
         return denied
+    blocked = _reject_viewer(_verify_token(_get_token_from_request(request) or ""))
+    if blocked:
+        return blocked
     import urllib.request as _ur
     import uuid
     try:
@@ -2485,10 +2530,13 @@ async def api_customers_list(request: Request):
 
 @app.post("/api/customers")
 async def api_customers_create(req: CustomerUpsertRequest, request: Request):
-    """手动新建客户档案。需登录。"""
+    """手动新建客户档案。需登录。观察者只读。"""
     user_info, err = _business_auth(request)
     if err:
         return err
+    blocked = _reject_viewer(user_info)
+    if blocked:
+        return blocked
     name = (req.name or "").strip()
     if not name:
         return JSONResponse({"ok": False, "message": "客户名称不能为空"}, status_code=400)
@@ -2533,10 +2581,13 @@ async def api_customers_create(req: CustomerUpsertRequest, request: Request):
 
 @app.put("/api/customers/{record_id}")
 async def api_customers_update(record_id: str, req: CustomerUpsertRequest, request: Request):
-    """更新客户档案（分级/状态/跟进状态/备注等白名单字段）。需登录。"""
+    """更新客户档案（分级/状态/跟进状态/备注等白名单字段）。需登录。观察者只读。"""
     user_info, err = _business_auth(request)
     if err:
         return err
+    blocked = _reject_viewer(user_info)
+    if blocked:
+        return blocked
     try:
         from app import business
         fields = {}
@@ -2602,10 +2653,13 @@ async def api_mails_list(request: Request, lead_id: str = ""):
 @app.post("/api/mails/send")
 async def api_mails_send(req: MailSendRequest, request: Request):
     """SMTP SSL 真实发信并落「邮件记录」。
-    邮箱未配置（地址/授权码缺失）返回 503，前端提示去配置中心。需登录。"""
+    邮箱未配置（地址/授权码缺失）返回 503，前端提示去配置中心。需登录。观察者只读。"""
     user_info, err = _business_auth(request)
     if err:
         return err
+    blocked = _reject_viewer(user_info)
+    if blocked:
+        return blocked
     to_addr = (req.to or "").strip()
     subject = (req.subject or "").strip()
     body = (req.body or "").strip()
@@ -2629,10 +2683,13 @@ async def api_mails_send(req: MailSendRequest, request: Request):
 @app.post("/api/mails/sync")
 async def api_mails_sync(request: Request):
     """IMAP 拉取最近 30 天收件箱邮件落库（按邮箱关联线索/客户，消息ID 去重）。
-    邮箱未配置返回 503。需登录。"""
+    邮箱未配置返回 503。需登录。观察者只读。"""
     user_info, err = _business_auth(request)
     if err:
         return err
+    blocked = _reject_viewer(user_info)
+    if blocked:
+        return blocked
     try:
         from app import business
         result = business.sync_inbox()
@@ -2665,10 +2722,13 @@ async def api_pi_list(request: Request):
 
 @app.post("/api/pi")
 async def api_pi_create(req: PiUpsertRequest, request: Request):
-    """新建 PI（落订单表，PI状态=草稿/已发送等）。需登录。"""
+    """新建 PI（落订单表，PI状态=草稿/已发送等）。需登录。观察者只读。"""
     user_info, err = _business_auth(request)
     if err:
         return err
+    blocked = _reject_viewer(user_info)
+    if blocked:
+        return blocked
     customer_name = (req.customer_name or "").strip()
     if not customer_name:
         return JSONResponse({"ok": False, "message": "客户名称不能为空"}, status_code=400)
@@ -2703,10 +2763,13 @@ async def api_pi_create(req: PiUpsertRequest, request: Request):
 @app.put("/api/pi/{record_id}")
 async def api_pi_update(record_id: str, req: PiUpsertRequest, request: Request):
     """更新 PI（状态/金额/币种/备注等白名单）。
-    PI状态=已成交/已取消时同步写履约「当前状态」，兼容订单分布统计。需登录。"""
+    PI状态=已成交/已取消时同步写履约「当前状态」，兼容订单分布统计。需登录。观察者只读。"""
     user_info, err = _business_auth(request)
     if err:
         return err
+    blocked = _reject_viewer(user_info)
+    if blocked:
+        return blocked
     try:
         from app import business
         fields = {}
@@ -5645,11 +5708,12 @@ async def api_leads_search_status(request: Request):
 
 @app.post("/api/admin/leads/reset-search")
 async def api_admin_reset_search(request: Request):
-    """管理员强制重置搜索状态（清除卡死的搜索锁）。需登录。"""
+    """管理员强制重置搜索状态（清除卡死的搜索锁）。未登录 401，非 admin 403。"""
     token = _get_token_from_request(request)
     user_info = _verify_token(token) if token else None
-    if not user_info:
-        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    denied = _require_admin_user(user_info)
+    if denied:
+        return denied
     global _search_in_progress, _lead_search_job, _search_results_cache, _search_round
     _search_in_progress = False
     _search_round += 1
@@ -5670,6 +5734,9 @@ async def api_leads_search(request: Request, req: Optional[LeadSearchRequest] = 
     user_info = _verify_token(token) if token else None
     if not user_info:
         return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    blocked = _reject_viewer(user_info)
+    if blocked:
+        return blocked
 
     max_results = 30
     force_refresh = False
@@ -6257,11 +6324,14 @@ async def api_messages_unread_count(request: Request, type: str = ""):
 
 @app.put("/api/messages/{record_id}/read")
 async def api_messages_mark_read(record_id: str, request: Request):
-    """标记单条消息为已读。需登录。"""
+    """标记单条消息为已读。需登录。观察者只读。"""
     token = _get_token_from_request(request)
     user_info = _verify_token(token) if token else None
     if not user_info:
         return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    blocked = _reject_viewer(user_info)
+    if blocked:
+        return blocked
     try:
         tid = _ensure_messages_table()
         _feishu_api(
@@ -6277,11 +6347,14 @@ async def api_messages_mark_read(record_id: str, request: Request):
 
 @app.post("/api/messages/read-all")
 async def api_messages_read_all(request: Request):
-    """标记当前用户所有消息为已读（批量更新）。需登录。"""
+    """标记当前用户所有消息为已读（批量更新）。需登录。观察者只读。"""
     token = _get_token_from_request(request)
     user_info = _verify_token(token) if token else None
     if not user_info:
         return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    blocked = _reject_viewer(user_info)
+    if blocked:
+        return blocked
     try:
         messages = _fetch_messages(force_refresh=True)
         tid = _ensure_messages_table()
@@ -6310,11 +6383,14 @@ async def api_messages_read_all(request: Request):
 
 @app.post("/api/messages")
 async def api_messages_create(req: CreateMessageRequest, request: Request):
-    """手动创建消息通知（系统通知/审批通知等）。需登录，admin可发给指定人。"""
+    """手动创建消息通知（系统通知/审批通知等）。需登录，admin可发给指定人。观察者只读。"""
     token = _get_token_from_request(request)
     user_info = _verify_token(token) if token else None
     if not user_info:
         return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    blocked = _reject_viewer(user_info)
+    if blocked:
+        return blocked
     title = (req.title or "").strip()
     if not title:
         return JSONResponse({"ok": False, "message": "消息标题不能为空"}, status_code=400)
@@ -6889,11 +6965,14 @@ class EmailSendRequest(BaseModel):
 
 @app.post("/api/emails/send")
 async def api_emails_send(req: EmailSendRequest, request: Request):
-    """真实发送开发信并落库：先发信，成功后写「开发信记录」+ 更新线索跟进字段。需JWT认证。"""
+    """真实发送开发信并落库：先发信，成功后写「开发信记录」+ 更新线索跟进字段。需JWT认证。观察者只读。"""
     token = _get_token_from_request(request)
     user_info = _verify_token(token) if token else None
     if not user_info:
         return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    blocked = _reject_viewer(user_info)
+    if blocked:
+        return blocked
     record_id = (req.record_id or "").strip()
     company_name = (req.company_name or "").strip()
     recipient = (req.recipient_email or "").strip()
@@ -7035,32 +7114,25 @@ async def api_leads_public(request: Request):
 
 @app.get("/api/leads/my")
 async def api_leads_my(request: Request):
-    """私海池：返回当前销售认领的线索，按认领时间降序。需JWT认证。"""
+    """私海池：只返回当前登录用户姓名认领的线索，按认领时间降序。
+    忽略 X-Sales-Id，避免用请求头读取他人私海。需JWT认证。"""
     token = _get_token_from_request(request)
     user_info = _verify_token(token) if token else None
     if not user_info:
         return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
-    # 身份候选：优先前端当前认领身份(X-Sales-Id)，其次JWT姓名/账号；
-    # 归一化（去空白+忽略大小写）后任一命中即视为本人，兼容手输名与登录名差异
+
     def _norm_name(s):
         return "".join(str(s or "").split()).casefold()
 
-    candidates = []
-    header_sales = request.headers.get("X-Sales-Id", "").strip()
-    if header_sales:
-        candidates.append(header_sales)
-    for _k in ("name", "username"):
-        _v = (user_info.get(_k) or "").strip()
-        if _v:
-            candidates.append(_v)
-    norm_candidates = [_norm_name(c) for c in candidates if _norm_name(c)]
-    if not norm_candidates:
+    identity = _auth_display_name(user_info)
+    norm_identity = _norm_name(identity)
+    if not norm_identity:
         return {"ok": True, "items": [], "stats": {"total": 0}}
     try:
         leads = _fetch_leads(force_refresh=True)
         my_leads = [l for l in leads
                     if l.get("认领状态") == "已认领"
-                    and _norm_name(l.get("认领人")) in norm_candidates]
+                    and _norm_name(l.get("认领人")) == norm_identity]
         my_leads.sort(key=lambda x: x.get("认领时间", ""), reverse=True)
         return {"ok": True, "items": my_leads, "stats": {"total": len(my_leads)}}
     except Exception as e:
@@ -7070,16 +7142,17 @@ async def api_leads_my(request: Request):
 
 @app.post("/api/leads/claim/{record_id}")
 async def api_leads_claim_by_record(record_id: str, req: ClaimByRecordRequest, request: Request):
-    """公海池认领线索（先到先得）。需JWT认证。"""
+    """公海池认领线索（先到先得）。认领人取登录用户姓名，忽略请求体 claimer。需JWT认证。观察者只读。"""
     token = _get_token_from_request(request)
     user_info = _verify_token(token) if token else None
     if not user_info:
         return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
-    claimer = (req.claimer or "").strip()
+    blocked = _reject_viewer(user_info)
+    if blocked:
+        return blocked
+    claimer = _auth_display_name(user_info)
     if not claimer:
-        claimer = user_info.get("name", "") or user_info.get("username", "")
-    if not claimer:
-        return JSONResponse({"ok": False, "message": "缺少认领人信息，请在请求体传入claimer字段"}, status_code=400)
+        return JSONResponse({"ok": False, "message": "缺少认领人信息"}, status_code=400)
     try:
         tid = _ensure_leads_table()
         # 先查当前线索状态
@@ -7109,15 +7182,18 @@ class ReleaseByRecordRequest(BaseModel):
 
 @app.post("/api/leads/release/{record_id}")
 async def api_leads_release_by_record(record_id: str, req: ReleaseByRecordRequest, request: Request):
-    """释放已认领线索，退回公海池。仅当前认领人本人可释放；跟进状态与开发信历史保留。需JWT认证。"""
+    """释放已认领线索，退回公海池。释放人取登录用户姓名，忽略请求体 releaser 与 X-Sales-Id。
+    仅当前认领人本人可释放；跟进状态与开发信历史保留。需JWT认证。观察者只读。"""
     token = _get_token_from_request(request)
     user_info = _verify_token(token) if token else None
     if not user_info:
         return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
-    releaser = (req.releaser or "").strip()
+    blocked = _reject_viewer(user_info)
+    if blocked:
+        return blocked
+    releaser = _auth_display_name(user_info)
     if not releaser:
-        releaser = (request.headers.get("X-Sales-Id", "").strip()
-                    or user_info.get("name", "") or user_info.get("username", ""))
+        return JSONResponse({"ok": False, "message": "缺少认领人信息"}, status_code=400)
     try:
         tid = _ensure_leads_table()
         resp = _feishu_api("GET", f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records/{record_id}")
@@ -7257,10 +7333,14 @@ async def api_brave_breaker_reset(request: Request):
 
 @app.post("/api/leads/{record_id}/enrich")
 async def api_leads_enrich(record_id: str, req: Optional[EnrichLeadRequest] = None, request: Request = None):
-    """手动触发单条线索补全信息。depth: light=轻补搜, deep=深度补搜。需JWT认证。"""
+    """手动触发单条线索补全信息。depth: light=轻补搜, deep=深度补搜。需JWT认证。观察者只读。"""
     token = _get_token_from_request(request)
-    if not token or not _verify_token(token):
+    user_info = _verify_token(token) if token else None
+    if not user_info:
         return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    blocked = _reject_viewer(user_info)
+    if blocked:
+        return blocked
     depth = "light"
     if req:
         depth = req.depth if req.depth in ("light", "deep") else "light"
@@ -7635,11 +7715,12 @@ async def _favicon():
 
 @app.post("/api/admin/batch-exclusion")
 async def api_batch_exclusion(req: BatchExclusionRequest, request: Request):
-    """批量写入系统排除字段（用于公海池规则打标）"""
+    """批量写入系统排除字段（用于公海池规则打标）。未登录 401，非 admin 403。"""
     token = _get_token_from_request(request)
     user_info = _verify_token(token) if token else None
-    if not user_info:
-        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    denied = _require_admin_user(user_info)
+    if denied:
+        return denied
     updated, errors = 0, 0
     for item in req.items:
         rid = item.get("rid", "")
@@ -7659,11 +7740,12 @@ async def api_batch_exclusion(req: BatchExclusionRequest, request: Request):
 
 @app.post("/api/admin/backfill-market-priority")
 async def api_backfill_market_priority(request: Request):
-    """批量回填所有线索的市场优先级字段（P0/P1/P2），基于地区字段中的国家名计算"""
+    """批量回填所有线索的市场优先级字段（P0/P1/P2），基于地区字段中的国家名计算。未登录 401，非 admin 403。"""
     token = _get_token_from_request(request)
     user_info = _verify_token(token) if token else None
-    if not user_info:
-        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    denied = _require_admin_user(user_info)
+    if denied:
+        return denied
     leads = _fetch_leads(force_refresh=True)
     updated, skipped, errors = 0, 0, 0
     for ld in leads:
@@ -7765,11 +7847,12 @@ async def api_admin_batch_rescore(request: Request):
 
 @app.post("/api/admin/batch-region")
 async def api_batch_region(req: BatchRegionRequest, request: Request):
-    """批量更新线索地区字段（用于修复TLD映射缺失）"""
+    """批量更新线索地区字段（用于修复TLD映射缺失）。未登录 401，非 admin 403。"""
     token = _get_token_from_request(request)
     user_info = _verify_token(token) if token else None
-    if not user_info:
-        return JSONResponse({"ok": False, "message": "未登录或登录已过期"}, status_code=401)
+    denied = _require_admin_user(user_info)
+    if denied:
+        return denied
     updated, errors = 0, 0
     for item in req.items:
         rid = item.get("rid", "")

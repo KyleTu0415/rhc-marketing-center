@@ -554,7 +554,7 @@ function showAntibotGuide(opts){
         <div style="display:flex;align-items:center;gap:12px">
           <span class="card-sub" id="search-results-count"></span>
           <button class="btn btn-primary btn-sm" id="search-new-btn" onclick="searchNewLeads()"> 搜索新线索</button>
-          <button class="btn btn-sm" id="reset-search-btn" onclick="resetSearchState()" style="font-size:12px;padding:4px 10px;opacity:0.7"> 重置</button>
+          <button class="btn btn-sm" id="reset-search-btn" onclick="resetSearchState()" style="display:none;font-size:12px;padding:4px 10px;opacity:0.7"> 重置</button>
         </div>
       </div>
       <div class="card-body">
@@ -1668,7 +1668,12 @@ function authHeaders(){
 function loadCurrentUser(){
   return fetch('/api/auth/me',{headers:authHeaders(),cache:'no-store'})
     .then(function(r){return r.ok?r.json():{ok:false}})
-    .then(function(d){if(d&&d.ok){currentUser=d.user}return currentUser})
+    .then(function(d){
+      if(d&&d.ok){currentUser=d.user}
+      var resetBtn=document.getElementById('reset-search-btn');
+      if(resetBtn) resetBtn.style.display=(currentUser&&currentUser.role==='admin')?'':'none';
+      return currentUser
+    })
     .catch(function(){return null});
 }
 
@@ -2093,15 +2098,9 @@ function releaseLead(rid,companyName){
   companyName=String(companyName||'该客户');
   if(!rid){showToast('缺少客户标识，无法释放','error');return}
   var releaser=getClaimerName();
-  if(!releaser){
-    var input=prompt('请输入你的姓名（用于释放归属校验）：');
-    if(!input)return;
-    releaser=input.trim();
-    localStorage.setItem('rhc_claimer_name',releaser);
-  }
+  if(!releaser){showToast('请先登录后再释放','error');return}
   if(!confirm('确定释放 '+companyName+' 回公海池吗？\n\n释放后其他销售可认领，跟进记录与开发信历史会保留。'))return;
   var reqHeaders=Object.assign({'Content-Type':'application/json'},authHeaders());
-  reqHeaders['X-Sales-Id']=releaser;
   fetch('/api/leads/release/'+encodeURIComponent(rid),{
     method:'POST',
     headers:reqHeaders,
@@ -2856,13 +2855,7 @@ var myCustomersCache=null;  // {items: [...], timestamp: Date} 私海5分钟内�
 var MY_CUSTOMERS_CACHE_TTL=5*60*1000;
 
 function getClaimerName(){
-  var name=localStorage.getItem('rhc_claimer_name');
-  if(name)return name;
-  if(currentUser&&currentUser.name){
-    localStorage.setItem('rhc_claimer_name',currentUser.name);
-    return currentUser.name;
-  }
-  return '';
+  return (currentUser&&currentUser.name)||'';
 }
 
 function scoreBadgeHtml(score){
@@ -3429,12 +3422,7 @@ function startEnrichmentPolling(){
 
 function claimLead(rid,btn){
   var claimerName=getClaimerName();
-  if(!claimerName){
-    var input=prompt('请输入你的姓名（用于认领归属）：');
-    if(!input)return;
-    claimerName=input.trim();
-    localStorage.setItem('rhc_claimer_name',claimerName);
-  }
+  if(!claimerName){showToast('请先登录后再认领','error');return}
   if(btn){btn.disabled=true;btn.textContent='认领中…'}
   fetch('/api/leads/claim/'+encodeURIComponent(rid),{
     method:'POST',
@@ -3484,8 +3472,6 @@ function loadMyCustomers(forceRefresh){
   if(el)el.innerHTML='<div class="loading-state"><div class="spin"></div><div>正在加载我的客户…</div></div>';
   if(stats)stats.textContent='加载中…';
   var myReqHeaders=authHeaders();
-  var mySalesName=getClaimerName();
-  if(mySalesName)myReqHeaders['X-Sales-Id']=mySalesName;
   fetch('/api/leads/my',{headers:myReqHeaders,cache:'no-store'})
     .then(function(r){
       if(r.status===401)throw new Error('UNAUTHORIZED');
@@ -3553,15 +3539,21 @@ function updateMcBadge(){
 
 /* ===== Search New Leads ===== */
 function resetSearchState() {
+  if(!(currentUser&&currentUser.role==='admin')){
+    showToast('需要管理员权限','error');
+    return;
+  }
   if (!confirm('确认重置搜索状态？将清除当前搜索进度。')) return;
   fetch('/api/admin/leads/reset-search', {
     method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + token }
-  }).then(function(r) { return r.json(); })
-    .then(function(d) {
-      if (d.ok) { showFail('已重置', '搜索状态已清除，请重新点击「搜索新线索」。'); }
-      else { showFail('重置失败', d.message || '未知错误'); }
-    }).catch(function() { showFail('重置失败', '网络错误，请稍后重试'); });
+    headers: authHeaders()
+  }).then(function(r) { return r.json().then(function(d){ return {status:r.status, data:d||{}}; }); })
+    .then(function(res) {
+      var d=res.data||{};
+      if (res.status===403) { showToast(d.message||'需要管理员权限','error'); return; }
+      if (d.ok) { showToast('搜索状态已清除，请重新点击「搜索新线索」','success'); }
+      else { showToast(d.message||'重置失败','error'); }
+    }).catch(function() { showToast('网络错误，请稍后重试','error'); });
 }
 function searchNewLeads() {
   var btn = document.getElementById('search-new-btn');
