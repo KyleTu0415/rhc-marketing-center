@@ -166,6 +166,13 @@ def _get_token_from_request(request: Request) -> Optional[str]:
         return cookie_token
     return None
 
+def _require_login(request: Request):
+    """任意已登录角色即可。缺失或无效 token 在产生副作用前返回 401。"""
+    token = _get_token_from_request(request)
+    if not token or not _verify_token(token):
+        return JSONResponse({"ok": False, "message": "未登录"}, status_code=401)
+    return None
+
 class LoginRequest(BaseModel):
     username: str = ""
     password: str = ""
@@ -1875,7 +1882,10 @@ async def api_leads_find_email(req: LeadFindEmailRequest, request: Request):
 
 
 @app.post("/api/products")
-async def api_product_create(req: ProductUpsertRequest):
+async def api_product_create(req: ProductUpsertRequest, request: Request):
+    denied = _require_login(request)
+    if denied:
+        return denied
     import urllib.request as _ur
     try:
         fields = {"product_model": req.product_model, "product_name_cn": req.product_name,
@@ -1899,7 +1909,10 @@ async def api_product_create(req: ProductUpsertRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.put("/api/products/{record_id}")
-async def api_product_update(record_id: str, req: ProductUpsertRequest):
+async def api_product_update(record_id: str, req: ProductUpsertRequest, request: Request):
+    denied = _require_login(request)
+    if denied:
+        return denied
     import urllib.request as _ur
     try:
         fields = {}
@@ -1926,7 +1939,10 @@ async def api_product_update(record_id: str, req: ProductUpsertRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/products/{record_id}")
-async def api_product_delete(record_id: str):
+async def api_product_delete(record_id: str, request: Request):
+    denied = _require_login(request)
+    if denied:
+        return denied
     import urllib.request as _ur
     try:
         rq = _ur.Request(
@@ -1942,6 +1958,9 @@ async def api_product_delete(record_id: str):
 @app.post("/api/cutout")
 async def api_cutout(request: Request):
     """Accept image upload, remove background via rembg, return transparent PNG URL."""
+    denied = _require_login(request)
+    if denied:
+        return denied
     try:
         form = await request.form()
         file = form.get("file")
@@ -1994,9 +2013,124 @@ async def api_cutout(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# 产品图实际用到的主机：
+# - iili.io：两边 frontend 的 PRODUCT_IMAGE_MAP / 品牌图，以及 freeimage 返回的图片 CDN
+# - freeimage.host：产品图上传与抠图结果所在图床
+# - feishu.cn：index.html proxyImg 仅代理 feishu.cn/file/ 素材链接（含子域名）
+_PROXY_IMAGE_HOSTS = ("iili.io", "freeimage.host", "feishu.cn")
+
+
+def _proxy_image_denied():
+    return JSONResponse({"ok": False, "message": "图片地址不在允许范围内"}, status_code=400)
+
+
+def _proxy_host_allowed(host: str) -> bool:
+    host = (host or "").lower().rstrip(".")
+    for allowed in _PROXY_IMAGE_HOSTS:
+        if host == allowed or host.endswith("." + allowed):
+            return True
+    return False
+
+
+def _proxy_ip_blocked(ip) -> bool:
+    import ipaddress
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    if isinstance(ip, ipaddress.IPv4Address):
+        if ip in ipaddress.ip_network("100.64.0.0/10"):
+            return True
+        if ip == ipaddress.ip_address("100.100.100.200"):
+            return True
+    return bool(
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
+def _proxy_url_rejection(url: str):
+    """允许则返回 None，否则返回拒绝原因（仅供内部判断，不回显给客户端）。"""
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    parsed = urlparse((url or "").strip())
+    if parsed.scheme not in ("http", "https") or parsed.username or parsed.password:
+        return "scheme"
+    host = parsed.hostname
+    if not host:
+        return "host"
+    host_l = host.lower().rstrip(".")
+    if (
+        host_l in ("localhost", "metadata", "instance-data")
+        or host_l.endswith(".localhost")
+        or host_l.endswith(".internal")
+        or "metadata" in host_l
+    ):
+        return "metadata"
+    try:
+        ip = ipaddress.ip_address(host_l)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        if _proxy_ip_blocked(ip):
+            return "blocked-ip"
+        return "ip-not-allowlisted"
+    if not _proxy_host_allowed(host_l):
+        return "host"
+    if host_l == "feishu.cn" or host_l.endswith(".feishu.cn"):
+        if "/file/" not in (parsed.path or ""):
+            return "feishu-path"
+    try:
+        infos = socket.getaddrinfo(host_l, None)
+    except socket.gaierror:
+        return "dns"
+    if not infos:
+        return "dns"
+    for info in infos:
+        addr = info[4][0]
+        if "%" in addr:
+            addr = addr.split("%", 1)[0]
+        try:
+            resolved = ipaddress.ip_address(addr)
+        except ValueError:
+            return "dns"
+        if _proxy_ip_blocked(resolved):
+            return "resolved-private"
+    return None
+
+
+async def _proxy_fetch_image(url: str):
+    """只跟随仍在允许列表内的重定向，避免开放重定向打到内网。"""
+    import httpx
+    from urllib.parse import urljoin
+
+    async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
+        current = url
+        for _ in range(4):
+            if _proxy_url_rejection(current):
+                return None
+            resp = await client.get(current)
+            if resp.status_code in (301, 302, 303, 307, 308):
+                loc = resp.headers.get("location")
+                if not loc:
+                    return None
+                current = urljoin(current, loc)
+                continue
+            resp.raise_for_status()
+            return resp
+    return None
+
+
 @app.get("/api/proxy-image")
-async def api_proxy_image(url: str):
+async def api_proxy_image(url: str, request: Request):
     """Proxy image to avoid CORS taint on canvas. Returns image bytes with CORS headers."""
+    denied = _require_login(request)
+    if denied:
+        return denied
     import os as _os
     if url.startswith("/") and not url.startswith("//"):
         from fastapi.responses import FileResponse
@@ -2006,11 +2140,12 @@ async def api_proxy_image(url: str):
         if _safe.startswith(_uploads + _os.sep) and _os.path.isfile(_safe):
             return FileResponse(_safe)
         raise HTTPException(status_code=404, detail="local file not found")
-    import httpx
+    if _proxy_url_rejection(url):
+        return _proxy_image_denied()
     try:
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
+        resp = await _proxy_fetch_image(url)
+        if resp is None:
+            return _proxy_image_denied()
         from fastapi.responses import Response
         content_type = resp.headers.get("content-type", "image/png")
         return Response(
@@ -2021,12 +2156,15 @@ async def api_proxy_image(url: str):
                 "Cache-Control": "public, max-age=86400",
             },
         )
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Proxy failed: {e}")
+    except Exception:
+        raise HTTPException(status_code=502, detail="Proxy failed")
 
 
 @app.post("/api/upload-image")
 async def api_upload_image(request: Request):
+    denied = _require_login(request)
+    if denied:
+        return denied
     import urllib.request as _ur
     import uuid
     try:
