@@ -100,13 +100,23 @@ app = FastAPI(title="RHC Marketing Assistant", version="1.0.0")
 # ============================================================
 # 认证系统 (Auth)
 # ============================================================
-SECRET_KEY = os.getenv("RHC_SECRET_KEY", "rhc-marketing-secret-2026")
+_secret_key = os.getenv("RHC_SECRET_KEY")
+if _secret_key is None or not _secret_key.strip():
+    raise RuntimeError("环境变量 RHC_SECRET_KEY 未设置")
+SECRET_KEY = _secret_key.strip()
 TOKEN_EXPIRY = 24 * 60 * 60  # 24 hours
 
 # 兜底账号：飞书多维表格不可用（网络/凭证/限流）时使用，保证系统不会被锁死。
 # 正常账号数据源为飞书「系统账号」表（见下方 _load_users 相关逻辑）。
+_fallback_admin_password = os.getenv("RHC_FALLBACK_ADMIN_PASSWORD")
+if _fallback_admin_password is None or not _fallback_admin_password.strip():
+    raise RuntimeError("环境变量 RHC_FALLBACK_ADMIN_PASSWORD 未设置")
 USERS = {
-    "ella": {"password": "rhc2026", "role": "admin", "name": "Ella"},
+    "ella": {
+        "password": _fallback_admin_password.strip(),
+        "role": "admin",
+        "name": "Ella",
+    },
 }
 
 def _create_token(username: str) -> str:
@@ -400,12 +410,12 @@ def _ensure_account_table():
     return _account_table_id
 
 def _seed_accounts_if_empty(tid):
-    """表为空时写入种子账号（与兜底 USERS 一致：ella / rhc2026 / Ella / admin / 启用）。"""
+    """表为空时写入种子账号（与兜底 USERS 一致：ella / Ella / admin / 启用）。"""
     resp = _feishu_api(
         "GET", f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records?page_size=1")
     if resp.get("data", {}).get("total", 0) > 0 or resp.get("data", {}).get("items"):
         return
-    fields = {"用户名": "ella", "密码": "rhc2026", "姓名": "Ella",
+    fields = {"用户名": "ella", "密码": USERS["ella"]["password"], "姓名": "Ella",
               "角色": "admin", "启用": "是"}
     _feishu_api("POST", f"/bitable/v1/apps/{FEISHU_ATK}/tables/{tid}/records",
                 {"fields": fields})
@@ -429,9 +439,12 @@ def _fetch_users_from_feishu():
             if not username:
                 continue
             # 单选字段读取值可能是 {"text": "admin"} 结构，统一用 _tv 归一
-            role = _tv(fl.get("角色")).strip() or "admin"
-            if role not in ("admin", "sales", "viewer"):
-                role = "admin"
+            raw_role = _tv(fl.get("角色")).strip()
+            if raw_role not in ("admin", "sales", "viewer"):
+                print(f"[auth] 警告: 账号 {username} 的角色「{raw_role}」无效，已设为 viewer")
+                role = "viewer"
+            else:
+                role = raw_role
             enabled = _tv(fl.get("启用")).strip()
             users[username] = {
                 "password": _tv(fl.get("密码")),
